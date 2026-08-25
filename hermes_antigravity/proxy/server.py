@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -28,6 +29,7 @@ from hermes_antigravity.stream.transformer import (
 )
 
 logger = logging.getLogger(__name__)
+DEFAULT_PROXY_PORT = 51122
 
 
 async def handle_health(request: Request) -> JSONResponse:
@@ -141,67 +143,55 @@ routes = [
 app = Starlette(debug=False, routes=routes)
 
 
-class AntigravityProxyServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 0):
+class BackgroundServer:
+    def __init__(self, host: str = "127.0.0.1", port: int = DEFAULT_PROXY_PORT):
         self.host = host
-        self.requested_port = port
-        self.actual_port: Optional[int] = None
+        self.port = port
         self.server: Optional[uvicorn.Server] = None
-        self.task: Optional[asyncio.Task] = None
+        self.thread: Optional[threading.Thread] = None
 
-    async def start(self) -> str:
+    def start(self) -> str:
+        if self.thread and self.thread.is_alive():
+            return f"http://{self.host}:{self.port}/v1"
+
         config = uvicorn.Config(
             app=app,
             host=self.host,
-            port=self.requested_port,
-            log_level="warning",
+            port=self.port,
+            log_level="error",
             access_log=False,
         )
         self.server = uvicorn.Server(config)
 
-        # Start server in background asyncio task
-        self.task = asyncio.create_task(self.server.serve())
+        def run():
+            self.server.run()
 
-        # Wait until started and bound to port
-        for _ in range(50):
+        self.thread = threading.Thread(target=run, daemon=True, name="AntigravityProxy")
+        self.thread.start()
+
+        # Wait briefly for startup
+        for _ in range(30):
             if self.server.started:
                 break
-            await asyncio.sleep(0.05)
+            time.sleep(0.05)
 
-        # Retrieve bound socket
-        for server in getattr(self.server, "servers", []):
-            for socket in getattr(server, "sockets", []):
-                self.actual_port = socket.getsockname()[1]
-                break
-            if self.actual_port:
-                break
-
-        if not self.actual_port:
-            self.actual_port = self.requested_port or 51122
-
-        base_url = f"http://{self.host}:{self.actual_port}/v1"
-        logger.info("Antigravity in-process proxy started at %s", base_url)
+        base_url = f"http://{self.host}:{self.port}/v1"
+        logger.info("Antigravity in-process proxy started in background on %s", base_url)
         return base_url
 
-    async def stop(self) -> None:
-        if self.server:
-            self.server.should_exit = True
-            if self.task:
-                await self.task
-            self.server = None
-            self.task = None
+
+_bg_server: Optional[BackgroundServer] = None
 
 
-_global_proxy: Optional[AntigravityProxyServer] = None
-_proxy_base_url: Optional[str] = None
-_proxy_lock = asyncio.Lock()
+def ensure_proxy_running(port: int = DEFAULT_PROXY_PORT) -> str:
+    global _bg_server
+    if _bg_server is None:
+        _bg_server = BackgroundServer(port=port)
+    return _bg_server.start()
 
 
-async def get_or_start_proxy() -> str:
-    global _global_proxy, _proxy_base_url
-    async with _proxy_lock:
-        if _global_proxy and _proxy_base_url:
-            return _proxy_base_url
-        _global_proxy = AntigravityProxyServer()
-        _proxy_base_url = await _global_proxy.start()
-        return _proxy_base_url
+# Auto-start proxy on default port when module is imported
+try:
+    ensure_proxy_running()
+except Exception as e:
+    logger.debug("Failed to auto-start proxy on import: %s", e)

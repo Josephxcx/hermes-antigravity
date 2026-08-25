@@ -18,7 +18,10 @@ from hermes_antigravity.models.models import (
     PROVIDER_ID,
     PROVIDER_NAME,
 )
-from hermes_antigravity.proxy.server import get_or_start_proxy
+from hermes_antigravity.proxy.server import (
+    DEFAULT_PROXY_PORT,
+    ensure_proxy_running,
+)
 from hermes_antigravity.usage.usage import format_quota_report
 
 logger = logging.getLogger(__name__)
@@ -118,7 +121,7 @@ async def command_antigravity_doctor() -> str:
     ]
 
     try:
-        proxy_url = await get_or_start_proxy()
+        proxy_url = ensure_proxy_running()
         status_lines.append(f"In-process Proxy: Active ({proxy_url})")
     except Exception as e:
         status_lines.append(f"In-process Proxy: Error ({e})")
