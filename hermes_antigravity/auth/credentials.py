@@ -13,7 +13,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 HERMES_AUTH_PATH = Path.home() / ".hermes" / "auth.json"
-PI_AUTH_PATH = Path.home() / ".pi" / "agent" / "auth.json"
 
 
 @dataclass
@@ -98,18 +97,13 @@ def save_credentials_to_file(creds: AntigravityCredentials, path: Path = HERMES_
 
 
 def load_credentials() -> Optional[AntigravityCredentials]:
-    """Loads credentials checking environment variables, Hermes store, and Pi store."""
+    """Loads credentials checking Hermes store and environment variables."""
     # 1. Check Hermes store (~/.hermes/auth.json)
     creds = load_credentials_from_file(HERMES_AUTH_PATH)
     if creds and creds.access_token:
         return creds
 
-    # 2. Check Pi store (~/.pi/agent/auth.json)
-    creds = load_credentials_from_file(PI_AUTH_PATH)
-    if creds and creds.access_token:
-        return creds
-
-    # 3. Check environment variables
+    # 2. Check environment variables
     env_token = os.environ.get("ANTIGRAVITY_TOKEN") or os.environ.get("GOOGLE_ACCESS_TOKEN")
     if env_token and not env_token.startswith("antigravity-local"):
         return AntigravityCredentials(

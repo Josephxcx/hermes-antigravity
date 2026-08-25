@@ -205,17 +205,7 @@ async def ensure_valid_credentials() -> AntigravityCredentials:
 
     if creds.is_expired():
         if creds.refresh_token:
-            try:
-                creds = await refresh_access_token(creds)
-            except Exception as primary_err:
-                # Try fallback token from Pi store if primary Hermes token was invalid
-                from hermes_antigravity.auth.credentials import PI_AUTH_PATH, load_credentials_from_file
-                pi_creds = load_credentials_from_file(PI_AUTH_PATH)
-                if pi_creds and pi_creds.refresh_token and pi_creds.refresh_token != creds.refresh_token:
-                    logger.info("Attempting refresh from Pi credentials store fallback...")
-                    creds = await refresh_access_token(pi_creds)
-                else:
-                    raise primary_err
+            creds = await refresh_access_token(creds)
         else:
             logger.warning("Antigravity token is expired and has no refresh token.")
 

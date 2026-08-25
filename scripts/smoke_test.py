@@ -20,7 +20,7 @@ async def main():
     # 1. Check credentials
     creds = load_credentials()
     if not creds or not creds.access_token:
-        logger.error("❌ No Antigravity credentials found in ~/.hermes/auth.json or ~/.pi/agent/auth.json")
+        logger.error("❌ No Antigravity credentials found in ~/.hermes/auth.json")
         sys.exit(1)
 
     logger.info("✅ Found credentials for account: %s (expires: %s)", creds.email, creds.expires_at)

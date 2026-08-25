@@ -18,7 +18,7 @@ This project is a Python port of [`pi-antigravity`](https://github.com/Rahularya
 ## Features
 
 - **Google OAuth 2.0 PKCE:** Loopback callback authorization on `http://localhost:51121/oauth-callback`.
-- **Credential Storage:** Stores credentials securely in Hermes's credential store (`~/.hermes/auth.json` and fallback).
+- **Credential Storage:** Stores credentials securely in Hermes's credential store (`~/.hermes/auth.json`).
 - **Embedded In-Process Proxy:** Transparently bridges Hermes Agent's OpenAI `chat_completions` transport to Google Cloud Code Assist JSON envelopes and SSE streaming.
 - **Dynamic Model & Thinking Routing:**
   - `gemini-3.7-flash` (with `thinkingConfig` mapping)
