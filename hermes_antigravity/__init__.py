@@ -78,22 +78,104 @@ antigravity_profile = AntigravityProviderProfile(
 register_provider(antigravity_profile)
 
 
-async def command_antigravity_auth() -> str:
+async def command_antigravity_auth(*args, **kwargs) -> str:
     """CLI/Interactive command to authenticate with Google Antigravity."""
     verifier, challenge = generate_pkce()
     state = generate_pkce()[0][:16]
     auth_url = build_authorization_url(state, challenge)
 
+    callback_url = kwargs.get("callback")
+    if callback_url:
+        try:
+            code, parsed_state = parse_pasted_callback(callback_url, state)
+            creds = await exchange_code_for_tokens(code, verifier)
+            return f"✅ Antigravity authentication successful! Logged in as: {creds.email}"
+        except Exception as e:
+            return f"❌ Failed to process callback URL: {e}"
+
+    from starlette.applications import Starlette
+    from starlette.responses import HTMLResponse
+    from starlette.requests import Request
+    from starlette.routing import Route
+    import uvicorn
+    import html
+
+    callback_data = {}
+    auth_event = asyncio.Event()
+
+    async def oauth_callback(request: Request):
+        err = request.query_params.get("error")
+        if err:
+            callback_data["error"] = err
+            auth_event.set()
+            return HTMLResponse(f"<h1>Authentication failed</h1><p>{html.escape(err)}</p>")
+
+        code = request.query_params.get("code")
+        ret_state = request.query_params.get("state")
+        
+        if not code or not ret_state:
+            callback_data["error"] = "Missing code or state"
+            auth_event.set()
+            return HTMLResponse("<h1>Authentication failed</h1><p>Missing code or state.</p>", status_code=400)
+
+        if ret_state != state:
+            callback_data["error"] = "State mismatch"
+            auth_event.set()
+            return HTMLResponse("<h1>Authentication failed</h1><p>State mismatch.</p>", status_code=400)
+
+        callback_data["code"] = code
+        auth_event.set()
+        return HTMLResponse(
+            "<h1>Antigravity Authentication Complete</h1>"
+            "<p>You can close this window and return to Hermes.</p>"
+            "<script>window.close()</script>"
+        )
+
+    app = Starlette(routes=[
+        Route("/oauth-callback", oauth_callback)
+    ])
+
+    config = uvicorn.Config(app=app, host="127.0.0.1", port=51121, log_level="warning", access_log=False)
+    server = uvicorn.Server(config)
+    
+    server_task = asyncio.create_task(server.serve())
+
+    import webbrowser
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
     prompt = (
         "=== Antigravity Authentication ===\n"
-        "1. Open the following URL in your browser:\n\n"
+        "Your browser should have opened automatically to log in with your Google account.\n"
+        "If it didn't, please open this URL manually:\n\n"
         f"   {auth_url}\n\n"
-        "2. Log in with your Google account.\n"
-        "3. If you are in a desktop environment, the browser will redirect to localhost:51121.\n"
-        "   If you are on a remote/headless machine, copy the redirected URL and run:\n"
-        "   /antigravity.auth --callback <URL>\n"
+        "Waiting for authentication callback on localhost:51121 (timeout 5 minutes)...\n"
     )
-    return prompt
+    print(prompt)
+
+    try:
+        await asyncio.wait_for(auth_event.wait(), timeout=300.0)
+    except asyncio.TimeoutError:
+        server.should_exit = True
+        return "❌ Authentication timed out waiting for browser callback."
+
+    server.should_exit = True
+    await server_task
+
+    if "error" in callback_data:
+        return f"❌ Authentication failed: {callback_data["error"]}"
+
+    code = callback_data.get("code")
+    if code:
+        try:
+            creds = await exchange_code_for_tokens(code, verifier)
+            return f"✅ Antigravity authentication successful! Logged in as: {creds.email}"
+        except Exception as e:
+            return f"❌ Failed to exchange code for tokens: {e}"
+
+    return "❌ Authentication failed for unknown reason." 
 
 
 async def command_antigravity_quota() -> str:
