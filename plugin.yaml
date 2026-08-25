@@ -1,0 +1,9 @@
+name: antigravity-provider
+kind: model-provider
+version: 0.4.1
+description: Google Antigravity / Cloud Code Assist provider for Hermes Agent
+author: Rahul Arya & Hermes Agent Contributors
+provides_commands:
+  - antigravity.auth
+  - antigravity.quota
+  - antigravity.doctor

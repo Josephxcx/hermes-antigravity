@@ -1,0 +1,112 @@
+"""Unit tests for Antigravity OAuth and credential handling."""
+
+import base64
+import hashlib
+import json
+import time
+import urllib.parse
+from pathlib import Path
+
+import pytest
+
+from hermes_antigravity.auth.credentials import (
+    AntigravityCredentials,
+    load_credentials_from_file,
+    save_credentials_to_file,
+)
+from hermes_antigravity.auth.oauth import (
+    build_authorization_url,
+    generate_pkce,
+    parse_pasted_callback,
+)
+
+
+def test_pkce_generation():
+    verifier, challenge = generate_pkce()
+    assert len(verifier) >= 32
+    # Verify challenge is base64url(sha256(verifier))
+    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    assert challenge == expected
+
+
+def test_build_authorization_url():
+    state = "test-state-12345"
+    challenge = "test-challenge-abc"
+    url = build_authorization_url(state, challenge)
+
+    parsed = urllib.parse.urlparse(url)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "accounts.google.com"
+    assert parsed.path == "/o/oauth2/v2/auth"
+
+    params = urllib.parse.parse_qs(parsed.query)
+    assert params["state"] == [state]
+    assert params["code_challenge"] == [challenge]
+    assert params["code_challenge_method"] == ["S256"]
+    assert params["response_type"] == ["code"]
+    assert "aicode" in params["scope"][0]
+
+
+def test_parse_pasted_callback_valid():
+    state = "state-987"
+    raw_url = f"http://localhost:51121/oauth-callback?code=4/0Abc123xyz&state={state}"
+    code, parsed_state = parse_pasted_callback(raw_url, state)
+    assert code == "4/0Abc123xyz"
+    assert parsed_state == state
+
+
+def test_parse_pasted_callback_mismatched_state():
+    with pytest.raises(ValueError, match="state parameter mismatch"):
+        parse_pasted_callback("http://localhost:51121/oauth-callback?code=abc&state=wrong", "expected")
+
+
+def test_parse_pasted_callback_error():
+    with pytest.raises(ValueError, match="OAuth authorization failed: access_denied"):
+        parse_pasted_callback("http://localhost:51121/oauth-callback?error=access_denied&state=s", "s")
+
+
+def test_credential_expiry_logic():
+    now_ms = int(time.time() * 1000)
+    # Expired token
+    creds_expired = AntigravityCredentials(
+        access_token="tok1",
+        refresh_token="ref1",
+        expires_at=now_ms - 1000,
+    )
+    assert creds_expired.is_expired() is True
+
+    # Token expiring in 2 minutes (buffer is 5 minutes -> should report expired for refresh)
+    creds_near_expiry = AntigravityCredentials(
+        access_token="tok2",
+        refresh_token="ref2",
+        expires_at=now_ms + 120_000,
+    )
+    assert creds_near_expiry.is_expired(buffer_seconds=300) is True
+
+    # Token valid for 1 hour
+    creds_valid = AntigravityCredentials(
+        access_token="tok3",
+        refresh_token="ref3",
+        expires_at=now_ms + 3600_000,
+    )
+    assert creds_valid.is_expired() is False
+
+
+def test_credential_save_and_load(tmp_path: Path):
+    auth_file = tmp_path / "auth.json"
+    creds = AntigravityCredentials(
+        access_token="acc-token-123",
+        refresh_token="ref-token-456",
+        expires_at=1750000000000,
+        email="dev@example.com",
+        project_id="test-proj-789",
+    )
+    save_credentials_to_file(creds, auth_file)
+
+    loaded = load_credentials_from_file(auth_file)
+    assert loaded is not None
+    assert loaded.access_token == "acc-token-123"
+    assert loaded.refresh_token == "ref-token-456"
+    assert loaded.expires_at == 1750000000000
+    assert loaded.email == "dev@example.com"
+    assert loaded.project_id == "test-proj-789"

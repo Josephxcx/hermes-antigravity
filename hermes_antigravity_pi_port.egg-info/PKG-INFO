@@ -1,0 +1,64 @@
+Metadata-Version: 2.4
+Name: hermes-antigravity-pi-port
+Version: 0.4.1
+Summary: Antigravity / Google Cloud Code Assist provider plugin for Hermes Agent
+Author: Rahul Arya, Hermes Agent Contributors
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx>=0.25.0
+Requires-Dist: aiohttp>=3.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
+Requires-Dist: pytest-mock>=3.12.0; extra == "dev"
+Dynamic: license-file
+
+# Hermes Antigravity Provider Plugin (`hermes-antigravity-pi-port`)
+
+A native Hermes Agent model-provider plugin that enables access to Google Antigravity / Cloud Code Assist models (Gemini 3.7 Flash, Claude Sonnet 4.6, Claude Opus 4.6, Gemini 3.1 Pro, GPT-OSS 120B).
+
+> **⚠️ Disclaimer & Terms of Service Warning:**
+> This plugin uses Google's internal Cloud Code Assist APIs and OAuth flows. It is an **unofficial community project** and is neither endorsed nor supported by Google. Use at your own risk in accordance with Google Cloud Terms of Service.
+
+---
+
+## Origin & Credits
+
+This project is a Python port of [`pi-antigravity`](https://github.com/Rahularya01/pi-antigravity) by **Rahul Arya**, originally designed for the Pi Coding Agent harness.
+- Original author: Rahul Arya
+- License: MIT License (see `LICENSE`)
+
+---
+
+## Features
+
+- **Google OAuth 2.0 PKCE:** Loopback callback authorization on `http://localhost:51121/oauth-callback`.
+- **Credential Storage:** Stores credentials securely in Hermes's credential store (`~/.hermes/auth.json` and fallback).
+- **Embedded In-Process Proxy:** Transparently bridges Hermes Agent's OpenAI `chat_completions` transport to Google Cloud Code Assist JSON envelopes and SSE streaming.
+- **Dynamic Model & Thinking Routing:**
+  - `gemini-3.7-flash` (with `thinkingConfig` mapping)
+  - `claude-sonnet-4-6` (Thinking)
+  - `claude-opus-4-6` (Thinking)
+  - `gemini-3.1-pro`
+  - `gpt-oss-120b`
+- **Tool Calling:** Translates OpenAI function call declarations and tool invocation messages to Google Cloud Code Assist format and back.
+- **Quota & Diagnostics:** Commands for `/antigravity.quota` and `/antigravity.doctor`.
+
+---
+
+## Architecture
+
+```
+Hermes Agent (chat_completions)
+  │
+  ▼
+Hermes ProviderProfile (hermes_antigravity)
+  │
+  ▼ [Local Ephemeral HTTP Bridge (127.0.0.1)]
+Embedded Asyncio Proxy
+  ├── Request Transformer (OpenAI tools/messages -> Cloud Code Assist format)
+  ├── Google Cloud Code Assist Client (Headers, Project ID, Auth Bearer)
+  └── SSE Stream Decoder (Extracts thinking/reasoning_content & tool_calls)
+```
