@@ -39,20 +39,13 @@ async def handle_health(request: Request) -> JSONResponse:
 async def handle_models(request: Request) -> JSONResponse:
     models_data = [
         {
-            "id": f"antigravity/{model_id}",
+            "id": model_id,
             "object": "model",
             "created": int(time.time()),
             "owned_by": "antigravity",
         }
         for model_id in FALLBACK_MODELS
     ]
-    for model_id in FALLBACK_MODELS:
-        models_data.append({
-            "id": model_id,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "antigravity",
-        })
     return JSONResponse({"object": "list", "data": models_data})
 
 

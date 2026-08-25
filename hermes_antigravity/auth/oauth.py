@@ -164,20 +164,16 @@ _refresh_lock = asyncio.Lock()
 async def refresh_access_token(creds: AntigravityCredentials) -> AntigravityCredentials:
     """Refreshes an expired access token using the stored refresh_token."""
     async with _refresh_lock:
-        # Check again under lock in case another request refreshed it
-        latest = load_credentials()
-        if latest and not latest.is_expired():
-            return latest
-
-        if not creds.refresh_token:
+        clean_refresh = (creds.refresh_token or "").split("|")[0].strip()
+        if not clean_refresh:
             raise ValueError(
-                "No refresh token available for Antigravity OAuth. Please re-authenticate."
+                "No refresh token available for Antigravity OAuth. Please re-authenticate with /antigravity.auth."
             )
 
         data = {
             "client_id": get_client_id(),
             "client_secret": get_client_secret(),
-            "refresh_token": creds.refresh_token,
+            "refresh_token": clean_refresh,
             "grant_type": "refresh_token",
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -209,7 +205,17 @@ async def ensure_valid_credentials() -> AntigravityCredentials:
 
     if creds.is_expired():
         if creds.refresh_token:
-            creds = await refresh_access_token(creds)
+            try:
+                creds = await refresh_access_token(creds)
+            except Exception as primary_err:
+                # Try fallback token from Pi store if primary Hermes token was invalid
+                from hermes_antigravity.auth.credentials import PI_AUTH_PATH, load_credentials_from_file
+                pi_creds = load_credentials_from_file(PI_AUTH_PATH)
+                if pi_creds and pi_creds.refresh_token and pi_creds.refresh_token != creds.refresh_token:
+                    logger.info("Attempting refresh from Pi credentials store fallback...")
+                    creds = await refresh_access_token(pi_creds)
+                else:
+                    raise primary_err
         else:
             logger.warning("Antigravity token is expired and has no refresh token.")
 
