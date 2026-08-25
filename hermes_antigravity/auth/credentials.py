@@ -35,15 +35,15 @@ class AntigravityCredentials:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AntigravityCredentials:
-        access_token = data.get("access_token") or data.get("access") or ""
-        refresh_token = data.get("refresh_token") or data.get("refresh") or ""
-        expires_at = data.get("expires_at") or data.get("expires") or 0
+        tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+        access_token = data.get("access_token") or data.get("access") or tokens.get("access_token") or tokens.get("access") or ""
+        refresh_token = data.get("refresh_token") or data.get("refresh") or tokens.get("refresh_token") or tokens.get("refresh") or ""
+        expires_at = data.get("expires_at") or data.get("expires") or tokens.get("expires_at") or data.get("last_refresh") or 0
         if expires_at and expires_at < 1e11:
-            # If stored in seconds instead of milliseconds, convert to ms
             expires_at = int(expires_at * 1000)
 
-        email = data.get("email")
-        project_id = data.get("project_id") or data.get("projectId")
+        email = data.get("email") or tokens.get("email")
+        project_id = data.get("project_id") or data.get("projectId") or tokens.get("project_id")
         return cls(
             access_token=str(access_token),
             refresh_token=str(refresh_token),
@@ -59,8 +59,12 @@ def load_credentials_from_file(path: Path) -> Optional[AntigravityCredentials]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         entry = data.get("antigravity")
+        if not entry and isinstance(data.get("providers"), dict):
+            entry = data["providers"].get("antigravity")
         if isinstance(entry, dict):
-            return AntigravityCredentials.from_dict(entry)
+            creds = AntigravityCredentials.from_dict(entry)
+            if creds.access_token or creds.refresh_token:
+                return creds
     except Exception as e:
         logger.warning("Failed to load credentials from %s: %s", path, e)
     return None
