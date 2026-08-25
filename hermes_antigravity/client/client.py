@@ -75,9 +75,19 @@ def default_project_id(seed: str = "antigravity-default") -> str:
 
 
 def extract_project_id(data: Any) -> Optional[str]:
+    if isinstance(data, str) and data.strip():
+        return data.strip()
     if not isinstance(data, dict):
         return None
-    for key in ("antigravityProjectId", "projectId", "backendProjectId", "userDefinedCloudaicompanionProject", "cloudaicompanionProject", "project"):
+    for key in (
+        "antigravityProjectId",
+        "projectId",
+        "backendProjectId",
+        "userDefinedCloudaicompanionProject",
+        "cloudaicompanionProject",
+        "project",
+        "id",
+    ):
         val = data.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()
@@ -91,8 +101,6 @@ def extract_project_id(data: Any) -> Optional[str]:
                 nested = extract_project_id(item)
                 if nested:
                     return nested
-                if isinstance(item, str) and item.strip():
-                    return item.strip()
     return None
 
 
@@ -103,7 +111,7 @@ async def list_cloud_ai_companion_projects(token: str) -> Optional[str]:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 res = await client.post(
                     f"{endpoint}/v1internal:listCloudAICompanionProjects",
-                    headers=antigravityHeaders(token),
+                    headers=antigravity_headers(token),
                     json={},
                 )
                 if res.status_code == 200:
