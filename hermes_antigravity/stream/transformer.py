@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import re
@@ -28,6 +29,48 @@ ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION = (
 
 _tool_call_counter = 0
 
+# Cache for cryptographic thoughtSignatures returned by Google for tool calls
+_SIGNATURE_CACHE_SIZE = 2000
+_signature_by_id: collections.OrderedDict[str, str] = collections.OrderedDict()
+_signature_by_fn_name: collections.OrderedDict[str, str] = collections.OrderedDict()
+_last_thought_signature: Optional[str] = None
+
+
+def record_thought_signature(
+    signature: str,
+    tool_id: Optional[str] = None,
+    fn_name: Optional[str] = None,
+    args: Optional[Dict[str, Any]] = None,
+) -> None:
+    global _last_thought_signature
+    if not signature:
+        return
+    _last_thought_signature = signature
+
+    if tool_id:
+        _signature_by_id[tool_id] = signature
+        if len(_signature_by_id) > _SIGNATURE_CACHE_SIZE:
+            _signature_by_id.popitem(last=False)
+
+    if fn_name:
+        _signature_by_fn_name[fn_name] = signature
+        if len(_signature_by_fn_name) > _SIGNATURE_CACHE_SIZE:
+            _signature_by_fn_name.popitem(last=False)
+
+
+def retrieve_thought_signature(
+    tool_id: Optional[str] = None,
+    fn_name: Optional[str] = None,
+    args: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    if tool_id and tool_id in _signature_by_id:
+        return _signature_by_id[tool_id]
+
+    if fn_name and fn_name in _signature_by_fn_name:
+        return _signature_by_fn_name[fn_name]
+
+    return _last_thought_signature
+
 
 def sanitize_tool_call_id(tool_id: Optional[str], fallback_name: str = "tool") -> str:
     global _tool_call_counter
@@ -42,7 +85,14 @@ def sanitize_tool_call_id(tool_id: Optional[str], fallback_name: str = "tool") -
 def needs_tool_call_id(model_id: str, runtime_model: str) -> bool:
     mid = model_id.lower()
     rm = runtime_model.lower()
-    return mid.startswith("claude-") or mid.startswith("gpt-oss-") or rm.startswith("claude-") or rm.startswith("gpt-oss-")
+    return (
+        mid.startswith("claude-")
+        or mid.startswith("gpt-oss-")
+        or rm.startswith("claude-")
+        or rm.startswith("gpt-oss-")
+        or "gemini" in mid
+        or "gemini" in rm
+    )
 
 
 def convert_openai_tools_to_gemini(
@@ -80,7 +130,7 @@ def build_gemini_request(
     project_id: str,
 ) -> Tuple[str, Dict[str, Any]]:
     """Translates an OpenAI /v1/chat/completions payload to (runtime_model_id, envelope_dict)."""
-    raw_model = openai_req.get("model", "gemini-3.7-flash")
+    raw_model = openai_req.get("model", "gemini-3.1-pro")
     reasoning_effort = openai_req.get("reasoning_effort") or openai_req.get("reasoning", {}).get("effort")
     runtime_model = get_runtime_model_id(raw_model, reasoning_effort)
 
@@ -129,16 +179,16 @@ def build_gemini_request(
 
         elif role == "assistant":
             parts = []
-            # Check for reasoning_content or thought
+            # Note: For Gemini tool calling, skip separate thought part if functionCall is present
+            # to keep thoughtSignature directly attached to functionCall as required by Google.
+            tool_calls = msg.get("tool_calls", [])
             reasoning = msg.get("reasoning_content")
-            if reasoning:
+            if reasoning and not tool_calls:
                 parts.append({"thought": True, "text": reasoning})
 
             if isinstance(content, str) and content.strip():
                 parts.append({"text": content})
 
-            # Check for tool_calls
-            tool_calls = msg.get("tool_calls", [])
             for tc in tool_calls:
                 func = tc.get("function", {})
                 fn_name = func.get("name", "")
@@ -151,7 +201,7 @@ def build_gemini_request(
                 else:
                     args = args_raw or {}
 
-                call_id = sanitize_tool_call_id(tc.get("id"), fn_name)
+                call_id = tc.get("id") or sanitize_tool_call_id(None, fn_name)
                 fn_part: Dict[str, Any] = {
                     "functionCall": {
                         "name": fn_name,
@@ -160,6 +210,16 @@ def build_gemini_request(
                 }
                 if needs_tool_call_id(raw_model, runtime_model):
                     fn_part["functionCall"]["id"] = call_id
+
+                # Attach cryptographic thoughtSignature if available
+                sig = (
+                    tc.get("thought_signature")
+                    or tc.get("thoughtSignature")
+                    or retrieve_thought_signature(call_id, fn_name, args)
+                )
+                if sig:
+                    fn_part["thoughtSignature"] = sig
+
                 parts.append(fn_part)
 
             if parts:
@@ -235,6 +295,8 @@ async def transform_google_sse_to_openai(
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_ts = int(time.time())
     tool_idx = 0
+    current_thought_sig: Optional[str] = None
+    active_tool_ids: Dict[int, str] = {}
 
     async for line in response_stream:
         line = line.strip()
@@ -267,6 +329,11 @@ async def transform_google_sse_to_openai(
         parts = content.get("parts", [])
 
         for part in parts:
+            sig = part.get("thoughtSignature") or part.get("thought_signature")
+            if sig:
+                current_thought_sig = sig
+                record_thought_signature(sig)
+
             # 1. Thinking / Reasoning text
             if part.get("thought") is True:
                 thought_text = part.get("text", "")
@@ -314,8 +381,17 @@ async def transform_google_sse_to_openai(
                 fc = part["functionCall"]
                 fn_name = fc.get("name", "")
                 args = fc.get("args", {})
-                call_id = fc.get("id") or sanitize_tool_call_id(None, fn_name)
+                
+                # Maintain stable ID per tool call index in this turn
+                if tool_idx not in active_tool_ids:
+                    active_tool_ids[tool_idx] = fc.get("id") or sanitize_tool_call_id(None, fn_name)
+                call_id = active_tool_ids[tool_idx]
+
                 args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+
+                # Record the signature with this specific call_id and function
+                if current_thought_sig:
+                    record_thought_signature(current_thought_sig, tool_id=call_id, fn_name=fn_name, args=args if isinstance(args, dict) else None)
 
                 openai_chunk = {
                     "id": completion_id,

@@ -6,6 +6,8 @@ import pytest
 from hermes_antigravity.stream.transformer import (
     build_gemini_request,
     convert_openai_tools_to_gemini,
+    record_thought_signature,
+    retrieve_thought_signature,
     transform_google_sse_to_openai,
 )
 
@@ -101,6 +103,41 @@ def test_build_gemini_request_tool_calling():
     assert contents[2]["role"] == "user"
     assert "functionResponse" in contents[2]["parts"][0]
     assert contents[2]["parts"][0]["functionResponse"]["name"] == "get_weather"
+
+
+def test_thought_signature_injection():
+    record_thought_signature("test_sig_abc123", tool_id="call_999", fn_name="test_tool", args={"x": 1})
+
+    openai_req = {
+        "model": "gemini-3.1-pro",
+        "messages": [
+            {"role": "user", "content": "Run test tool"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_999",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": '{"x": 1}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_999",
+                "name": "test_tool",
+                "content": '{"result": "ok"}',
+            },
+        ],
+    }
+    runtime_model, envelope = build_gemini_request(openai_req, "proj-abc")
+    model_turn = envelope["request"]["contents"][1]
+    assert "thoughtSignature" in model_turn["parts"][0]
+    assert model_turn["parts"][0]["thoughtSignature"] == "test_sig_abc123"
 
 
 @pytest.mark.asyncio
