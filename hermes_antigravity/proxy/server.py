@@ -154,6 +154,14 @@ class BackgroundServer:
         if self.thread and self.thread.is_alive():
             return f"http://{self.host}:{self.port}/v1"
 
+        # Check if another process or thread is already serving port 51122
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            if s.connect_ex((self.host, self.port)) == 0:
+                # Already listening
+                return f"http://{self.host}:{self.port}/v1"
+
         config = uvicorn.Config(
             app=app,
             host=self.host,
