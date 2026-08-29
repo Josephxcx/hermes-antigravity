@@ -52,6 +52,7 @@ class AntigravityProviderProfile(ProviderProfile):
         supports_reasoning: bool = False,
         **ctx: Any,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        ensure_proxy_running()
         extra_body: Dict[str, Any] = {}
         if reasoning_config:
             extra_body["reasoning_effort"] = reasoning_config.get("effort", "medium")
