@@ -78,6 +78,11 @@ antigravity_profile = AntigravityProviderProfile(
 register_provider(antigravity_profile)
 
 
+def register(ctx: Any = None) -> None:
+    """Hermes Agent plugin registration entry point."""
+    register_provider(antigravity_profile)
+
+
 async def command_antigravity_auth(*args, **kwargs) -> str:
     """CLI/Interactive command to authenticate with Google Antigravity."""
     verifier, challenge = generate_pkce()
@@ -165,7 +170,8 @@ async def command_antigravity_auth(*args, **kwargs) -> str:
     await server_task
 
     if "error" in callback_data:
-        return f"❌ Authentication failed: {callback_data["error"]}"
+        err_msg = callback_data["error"]
+        return f"❌ Authentication failed: {err_msg}"
 
     code = callback_data.get("code")
     if code:
