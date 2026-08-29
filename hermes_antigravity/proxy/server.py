@@ -24,12 +24,28 @@ from hermes_antigravity.client.client import (
 )
 from hermes_antigravity.models.models import FALLBACK_MODELS
 from hermes_antigravity.stream.transformer import (
+    aggregate_google_sse_to_openai_response,
     build_gemini_request,
     transform_google_sse_to_openai,
 )
 
 logger = logging.getLogger(__name__)
 DEFAULT_PROXY_PORT = 51122
+
+
+MAX_RETRIES_PER_ENDPOINT = 3
+BASE_BACKOFF_SECS = 1.0
+
+
+def is_retryable_status(status_code: int, error_text: str = "") -> bool:
+    """Determines if a Google Cloud Code Assist error response is transient/retryable."""
+    if status_code in (429, 500, 502, 503, 504):
+        return True
+    if status_code == 400:
+        upper = error_text.upper()
+        if "RESOURCE_EXHAUSTED" in upper or "QUOTA" in upper or "RATE_LIMIT" in upper:
+            return True
+    return False
 
 
 async def handle_health(request: Request) -> JSONResponse:
@@ -49,7 +65,7 @@ async def handle_models(request: Request) -> JSONResponse:
     return JSONResponse({"object": "list", "data": models_data})
 
 
-async def handle_chat_completions(request: Request) -> StreamingResponse:
+async def handle_chat_completions(request: Request) -> JSONResponse | StreamingResponse:
     try:
         body = await request.json()
     except Exception:
@@ -70,13 +86,79 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
     if body.get("model", "").lower().startswith("claude-"):
         headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
 
+    is_stream = bool(body.get("stream", False))
+    model_name = body.get("model", "gemini-3.7-flash")
+
+    # Handle Non-Streaming requests
+    if not is_stream:
+        last_status = 500
+        last_err_text = ""
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for endpoint in ENDPOINT_FALLBACKS:
+                    url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
+                    for attempt in range(MAX_RETRIES_PER_ENDPOINT):
+                        try:
+                            async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
+                                if g_resp.status_code == 200:
+                                    async def line_gen():
+                                        async for line in g_resp.aiter_lines():
+                                            if line:
+                                                yield line
+
+                                    openai_response = await aggregate_google_sse_to_openai_response(
+                                        line_gen(), model_name
+                                    )
+                                    return JSONResponse(openai_response)
+                                else:
+                                    last_status = g_resp.status_code
+                                    err_bytes = await g_resp.aread()
+                                    last_err_text = err_bytes.decode("utf-8", errors="replace")
+                                    logger.warning(
+                                        "Non-stream endpoint %s attempt %d failed (%d): %s",
+                                        endpoint,
+                                        attempt + 1,
+                                        last_status,
+                                        last_err_text,
+                                    )
+                                    if not is_retryable_status(last_status, last_err_text):
+                                        break
+                                    if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                                        await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                            logger.warning(
+                                "Network error in non-stream %s (attempt %d): %s",
+                                endpoint,
+                                attempt + 1,
+                                net_err,
+                            )
+                            if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                                await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": f"Google Cloud Code Assist error ({last_status}): {last_err_text}",
+                        "type": "antigravity_api_error",
+                        "code": last_status,
+                    }
+                },
+                status_code=last_status if last_status in (400, 401, 403, 404, 429) else 502,
+            )
+        except Exception as e:
+            logger.error("Error during non-streaming chat completion: %s", e)
+            return JSONResponse(
+                {"error": {"message": str(e), "type": "internal_proxy_error"}},
+                status_code=500,
+            )
+
+    # Handle Streaming requests
     async def sse_generator():
         async def line_generator(httpx_response: httpx.Response):
             async for line in httpx_response.aiter_lines():
                 if line:
                     yield line
 
-        model_name = body.get("model", "gemini-3.7-flash")
         success = False
         last_err_text = ""
         last_status = 500
@@ -84,20 +166,45 @@ async def handle_chat_completions(request: Request) -> StreamingResponse:
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 for endpoint in ENDPOINT_FALLBACKS:
+                    if success:
+                        break
                     url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
-                    async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
-                        if g_resp.status_code == 200:
-                            success = True
-                            async for chunk in transform_google_sse_to_openai(line_generator(g_resp), model_name):
-                                yield chunk.encode("utf-8")
-                            break
-                        else:
-                            last_status = g_resp.status_code
-                            err_bytes = await g_resp.aread()
-                            last_err_text = err_bytes.decode("utf-8", errors="replace")
-                            logger.warning("Endpoint %s failed (%d): %s", endpoint, last_status, last_err_text)
-                            if last_status not in (403, 404, 429, 500, 502, 503, 504):
-                                break
+
+                    for attempt in range(MAX_RETRIES_PER_ENDPOINT):
+                        try:
+                            async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
+                                if g_resp.status_code == 200:
+                                    success = True
+                                    async for chunk in transform_google_sse_to_openai(line_generator(g_resp), model_name):
+                                        yield chunk.encode("utf-8")
+                                    break
+                                else:
+                                    last_status = g_resp.status_code
+                                    err_bytes = await g_resp.aread()
+                                    last_err_text = err_bytes.decode("utf-8", errors="replace")
+                                    logger.warning(
+                                        "Endpoint %s attempt %d failed (%d): %s",
+                                        endpoint,
+                                        attempt + 1,
+                                        last_status,
+                                        last_err_text,
+                                    )
+
+                                    if not is_retryable_status(last_status, last_err_text):
+                                        break
+
+                                    if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                                        backoff = BASE_BACKOFF_SECS * (2**attempt)
+                                        await asyncio.sleep(backoff)
+                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                            logger.warning(
+                                "Network error connecting to %s (attempt %d): %s",
+                                endpoint,
+                                attempt + 1,
+                                net_err,
+                            )
+                            if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                                await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
 
             if not success:
                 err_chunk = {

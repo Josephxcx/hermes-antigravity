@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import collections
+import copy
 import json
 import logging
 import re
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from hermes_antigravity.models.models import (
     get_max_output_tokens,
@@ -95,6 +96,148 @@ def needs_tool_call_id(model_id: str, runtime_model: str) -> bool:
     )
 
 
+def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
+    """Recursively dereferences $defs/definitions/$ref and cleans JSON Schemas
+
+    to strictly comply with Google Cloud Code Assist Gemini OpenAPI schema validator.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+
+    schema_copy = copy.deepcopy(schema)
+
+    # 1. Collect all local definitions
+    defs: Dict[str, Any] = {}
+    for def_key in ("$defs", "definitions"):
+        if def_key in schema_copy and isinstance(schema_copy[def_key], dict):
+            defs.update(schema_copy[def_key])
+
+    def resolve_ref(ref_str: str) -> Optional[Dict[str, Any]]:
+        # e.g., #/$defs/MyType or #/definitions/MyType
+        parts = [p for p in ref_str.split("/") if p and p != "#"]
+        if not parts:
+            return None
+        target_name = parts[-1]
+        if target_name in defs:
+            return defs[target_name]
+        return None
+
+    def clean_node(node: Any, seen_refs: Set[str]) -> Any:
+        if isinstance(node, list):
+            return [clean_node(item, seen_refs) for item in node]
+
+        if not isinstance(node, dict):
+            return node
+
+        # Handle $ref
+        if "$ref" in node and isinstance(node["$ref"], str):
+            ref_target = node["$ref"]
+            if ref_target in seen_refs:
+                return {"type": "object", "description": f"Recursive ref to {ref_target}"}
+
+            resolved = resolve_ref(ref_target)
+            if resolved is not None:
+                new_seen = seen_refs | {ref_target}
+                merged = copy.deepcopy(resolved)
+                for k, v in node.items():
+                    if k != "$ref":
+                        merged[k] = v
+                return clean_node(merged, new_seen)
+            else:
+                return {"type": "string"}
+
+        # Handle allOf (merge sub-schemas)
+        if "allOf" in node and isinstance(node["allOf"], list):
+            merged_all: Dict[str, Any] = {}
+            for sub in node["allOf"]:
+                cleaned_sub = clean_node(sub, seen_refs)
+                if isinstance(cleaned_sub, dict):
+                    if "properties" in cleaned_sub:
+                        merged_all.setdefault("properties", {}).update(cleaned_sub["properties"])
+                    if "required" in cleaned_sub and isinstance(cleaned_sub["required"], list):
+                        merged_all.setdefault("required", []).extend(cleaned_sub["required"])
+                    for k, v in cleaned_sub.items():
+                        if k not in ("properties", "required"):
+                            merged_all[k] = v
+            for k, v in node.items():
+                if k != "allOf":
+                    merged_all[k] = v
+            return clean_node(merged_all, seen_refs)
+
+        # Handle anyOf / oneOf
+        if ("anyOf" in node and isinstance(node["anyOf"], list)) or ("oneOf" in node and isinstance(node["oneOf"], list)):
+            variants = node.get("anyOf") or node.get("oneOf") or []
+            cleaned_variants = [clean_node(v, seen_refs) for v in variants if isinstance(v, dict)]
+
+            # Check for nullable pattern: [{"type": "string"}, {"type": "null"}]
+            non_null_variants = [v for v in cleaned_variants if v.get("type") != "null"]
+            has_null = any(v.get("type") == "null" for v in cleaned_variants)
+
+            if len(non_null_variants) == 1:
+                primary = copy.deepcopy(non_null_variants[0])
+                if has_null:
+                    primary["nullable"] = True
+                for k, v in node.items():
+                    if k not in ("anyOf", "oneOf"):
+                        primary[k] = clean_node(v, seen_refs)
+                return primary
+            elif non_null_variants:
+                chosen = copy.deepcopy(non_null_variants[0])
+                if has_null:
+                    chosen["nullable"] = True
+                return chosen
+            else:
+                return {"type": "string", "nullable": True}
+
+        cleaned: Dict[str, Any] = {}
+
+        # Copy and clean attributes
+        for key, val in node.items():
+            # Skip disallowed Gemini OpenAPI meta keys
+            if key in ("$defs", "definitions", "$schema", "$id", "title", "additionalProperties", "default"):
+                continue
+            cleaned[key] = clean_node(val, seen_refs)
+
+        # Ensure type is present
+        if "type" not in cleaned:
+            if "properties" in cleaned:
+                cleaned["type"] = "object"
+            elif "items" in cleaned:
+                cleaned["type"] = "array"
+            elif "enum" in cleaned:
+                cleaned["type"] = "string"
+            else:
+                cleaned["type"] = "object"
+
+        # If type is array, items MUST be present
+        if cleaned.get("type") == "array" and "items" not in cleaned:
+            cleaned["items"] = {"type": "string"}
+
+        # If type is object, properties should be present
+        if cleaned.get("type") == "object":
+            if "properties" not in cleaned:
+                cleaned["properties"] = {}
+
+        # Clean required list
+        if "required" in cleaned and isinstance(cleaned["required"], list):
+            valid_required = []
+            props = cleaned.get("properties", {})
+            for r in cleaned["required"]:
+                if isinstance(r, str) and (r in props or not props):
+                    if r not in valid_required:
+                        valid_required.append(r)
+            cleaned["required"] = valid_required
+            if not valid_required:
+                cleaned.pop("required", None)
+
+        return cleaned
+
+    result = clean_node(schema_copy, set())
+    if not isinstance(result, dict):
+        return {"type": "object", "properties": {}}
+    return result
+
+
 def convert_openai_tools_to_gemini(
     tools: Optional[List[Dict[str, Any]]],
     use_legacy_parameters: bool = False,
@@ -111,13 +254,14 @@ def convert_openai_tools_to_gemini(
         if not name:
             continue
         desc = func.get("description", "")
-        params = func.get("parameters", {"type": "object", "properties": {}})
+        raw_params = func.get("parameters", {"type": "object", "properties": {}})
+        sanitized_params = inline_and_sanitize_schema(raw_params)
 
         decl: Dict[str, Any] = {"name": name, "description": desc}
         if use_legacy_parameters:
-            decl["parameters"] = params
+            decl["parameters"] = sanitized_params
         else:
-            decl["parametersJsonSchema"] = params
+            decl["parametersJsonSchema"] = sanitized_params
         declarations.append(decl)
 
     if not declarations:
@@ -298,6 +442,9 @@ async def transform_google_sse_to_openai(
     current_thought_sig: Optional[str] = None
     active_tool_ids: Dict[int, str] = {}
 
+    finish_chunk_sent = False
+    usage_dict: Optional[Dict[str, int]] = None
+
     async for line in response_stream:
         line = line.strip()
         if not line:
@@ -320,6 +467,17 @@ async def transform_google_sse_to_openai(
             raise RuntimeError(f"Google Cloud Code Assist API Error: {err_msg}")
 
         resp_data = chunk.get("response", chunk)
+        usage_meta = resp_data.get("usageMetadata") or chunk.get("usageMetadata")
+        if usage_meta and isinstance(usage_meta, dict):
+            p_tokens = usage_meta.get("promptTokenCount", 0)
+            c_tokens = usage_meta.get("candidatesTokenCount", 0)
+            t_tokens = usage_meta.get("totalTokenCount", p_tokens + c_tokens)
+            usage_dict = {
+                "prompt_tokens": p_tokens,
+                "completion_tokens": c_tokens,
+                "total_tokens": t_tokens,
+            }
+
         candidates = resp_data.get("candidates", [])
         if not candidates:
             continue
@@ -430,7 +588,7 @@ async def transform_google_sse_to_openai(
             elif finish_reason in ("TOOL_USE", "FUNCTION_CALL"):
                 fr_mapped = "tool_calls"
 
-            final_chunk = {
+            final_chunk: Dict[str, Any] = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created_ts,
@@ -443,6 +601,101 @@ async def transform_google_sse_to_openai(
                     }
                 ],
             }
+            if usage_dict:
+                final_chunk["usage"] = usage_dict
+            finish_chunk_sent = True
             yield f"data: {json.dumps(final_chunk)}\n\n"
 
+    if not finish_chunk_sent:
+        fallback_finish: Dict[str, Any] = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_ts,
+            "model": model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        if usage_dict:
+            fallback_finish["usage"] = usage_dict
+        yield f"data: {json.dumps(fallback_finish)}\n\n"
+
     yield "data: [DONE]\n\n"
+
+
+async def aggregate_google_sse_to_openai_response(
+    response_stream: AsyncGenerator[str, None],
+    model_id: str,
+) -> Dict[str, Any]:
+    """Aggregates Google SSE events into a single non-streaming OpenAI /v1/chat/completions response."""
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created_ts = int(time.time())
+
+    full_content = ""
+    full_reasoning = ""
+    tool_calls: List[Dict[str, Any]] = []
+    finish_reason = "stop"
+    usage_dict: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    async for chunk_str in transform_google_sse_to_openai(response_stream, model_id):
+        if not chunk_str.startswith("data:"):
+            continue
+        payload_str = chunk_str[5:].strip()
+        if not payload_str or payload_str == "[DONE]":
+            continue
+
+        try:
+            chunk = json.loads(payload_str)
+        except Exception:
+            continue
+
+        if "usage" in chunk and isinstance(chunk["usage"], dict):
+            usage_dict = chunk["usage"]
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+
+        choice = choices[0]
+        delta = choice.get("delta", {})
+
+        if "content" in delta and delta["content"]:
+            full_content += delta["content"]
+
+        if "reasoning_content" in delta and delta["reasoning_content"]:
+            full_reasoning += delta["reasoning_content"]
+
+        if "tool_calls" in delta and delta["tool_calls"]:
+            for tc in delta["tool_calls"]:
+                tool_calls.append(tc)
+
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+
+    message: Dict[str, Any] = {
+        "role": "assistant",
+        "content": full_content if full_content or not tool_calls else None,
+    }
+    if full_reasoning:
+        message["reasoning_content"] = full_reasoning
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created_ts,
+        "model": model_id,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage_dict,
+    }

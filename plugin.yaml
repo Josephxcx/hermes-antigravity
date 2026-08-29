@@ -1,4 +1,4 @@
-name: antigravity-provider
+name: antigravity
 kind: model-provider
 version: 0.4.1
 description: Google Antigravity / Cloud Code Assist provider for Hermes Agent

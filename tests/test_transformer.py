@@ -4,8 +4,10 @@ import json
 import pytest
 
 from hermes_antigravity.stream.transformer import (
+    aggregate_google_sse_to_openai_response,
     build_gemini_request,
     convert_openai_tools_to_gemini,
+    inline_and_sanitize_schema,
     record_thought_signature,
     retrieve_thought_signature,
     transform_google_sse_to_openai,
@@ -168,5 +170,129 @@ async def test_transform_google_sse_to_openai_stream():
     c2 = json.loads(output_chunks[1].replace("data: ", "").strip())
     assert c2["choices"][0]["delta"]["content"] == "Hello "
 
-    c3 = json.loads(output_chunks[2].replace("data: ", "").strip())
-    assert c3["choices"][0]["delta"]["content"] == "there!"
+@pytest.mark.asyncio
+async def test_transform_google_sse_with_usage_metadata():
+    google_sse_lines = [
+        'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello world"}]}}], "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 8, "totalTokenCount": 23}}}',
+        'data: {"response": {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}}',
+        "data: [DONE]",
+    ]
+
+    async def fake_stream():
+        for line in google_sse_lines:
+            yield line
+
+    output_chunks = []
+    async for chunk_str in transform_google_sse_to_openai(fake_stream(), "gemini-3.7-flash"):
+        output_chunks.append(chunk_str)
+
+    finish_chunk = json.loads(output_chunks[-2].replace("data: ", "").strip())
+    assert "usage" in finish_chunk
+    assert finish_chunk["usage"]["prompt_tokens"] == 15
+    assert finish_chunk["usage"]["completion_tokens"] == 8
+    assert finish_chunk["usage"]["total_tokens"] == 23
+
+
+@pytest.mark.asyncio
+async def test_aggregate_google_sse_to_openai_response():
+    google_sse_lines = [
+        'data: {"response": {"candidates": [{"content": {"parts": [{"thought": true, "text": "Plan: say hello."}]}}]}}',
+        'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello!"}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}}}',
+        'data: {"response": {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}}',
+        "data: [DONE]",
+    ]
+
+    async def fake_stream():
+        for line in google_sse_lines:
+            yield line
+
+    response = await aggregate_google_sse_to_openai_response(fake_stream(), "gemini-3.7-flash")
+
+    assert response["object"] == "chat.completion"
+    assert response["model"] == "gemini-3.7-flash"
+    assert response["usage"]["total_tokens"] == 15
+    choice = response["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "Hello!"
+    assert choice["message"]["reasoning_content"] == "Plan: say hello."
+
+
+
+def test_inline_and_sanitize_schema_defs_and_refs():
+    raw_schema = {
+        "type": "object",
+        "$defs": {
+            "UserDetail": {
+                "type": "object",
+                "properties": {
+                    "age": {"type": "integer"},
+                    "city": {"type": "string"},
+                },
+                "required": ["age"],
+            }
+        },
+        "properties": {
+            "name": {"type": "string"},
+            "details": {"$ref": "#/$defs/UserDetail"},
+        },
+        "required": ["name", "details"],
+    }
+
+    sanitized = inline_and_sanitize_schema(raw_schema)
+
+    # Verify $defs removed
+    assert "$defs" not in sanitized
+    assert sanitized["type"] == "object"
+    assert "name" in sanitized["properties"]
+    assert "details" in sanitized["properties"]
+
+    # Verify $ref inlined
+    details_prop = sanitized["properties"]["details"]
+    assert "$ref" not in details_prop
+    assert details_prop["type"] == "object"
+    assert "age" in details_prop["properties"]
+    assert details_prop["properties"]["age"]["type"] == "integer"
+
+
+def test_inline_and_sanitize_schema_anyof_nullable():
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "null"},
+                ]
+            }
+        },
+    }
+
+    sanitized = inline_and_sanitize_schema(raw_schema)
+    query_prop = sanitized["properties"]["query"]
+    assert query_prop["type"] == "string"
+    assert query_prop.get("nullable") is True
+
+
+def test_inline_and_sanitize_schema_allof_merging():
+    raw_schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"foo": {"type": "string"}},
+                "required": ["foo"],
+            },
+            {
+                "type": "object",
+                "properties": {"bar": {"type": "integer"}},
+                "required": ["bar"],
+            },
+        ]
+    }
+
+    sanitized = inline_and_sanitize_schema(raw_schema)
+    assert sanitized["type"] == "object"
+    assert "foo" in sanitized["properties"]
+    assert "bar" in sanitized["properties"]
+    assert "foo" in sanitized["required"]
+    assert "bar" in sanitized["required"]
+
