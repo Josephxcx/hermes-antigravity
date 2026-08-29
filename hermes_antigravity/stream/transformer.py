@@ -167,25 +167,18 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
         # Handle anyOf / oneOf
         if ("anyOf" in node and isinstance(node["anyOf"], list)) or ("oneOf" in node and isinstance(node["oneOf"], list)):
             variants = node.get("anyOf") or node.get("oneOf") or []
-            cleaned_variants = [clean_node(v, seen_refs) for v in variants if isinstance(v, dict)]
+            has_null = any(isinstance(v, dict) and v.get("type") == "null" for v in variants)
+            non_null_raw = [v for v in variants if isinstance(v, dict) and v.get("type") != "null"]
+            cleaned_variants = [clean_node(v, seen_refs) for v in non_null_raw]
 
-            # Check for nullable pattern: [{"type": "string"}, {"type": "null"}]
-            non_null_variants = [v for v in cleaned_variants if v.get("type") != "null"]
-            has_null = any(v.get("type") == "null" for v in cleaned_variants)
-
-            if len(non_null_variants) == 1:
-                primary = copy.deepcopy(non_null_variants[0])
+            if len(cleaned_variants) >= 1:
+                primary = copy.deepcopy(cleaned_variants[0])
                 if has_null:
                     primary["nullable"] = True
                 for k, v in node.items():
                     if k not in ("anyOf", "oneOf"):
                         primary[k] = clean_node(v, seen_refs)
-                return primary
-            elif non_null_variants:
-                chosen = copy.deepcopy(non_null_variants[0])
-                if has_null:
-                    chosen["nullable"] = True
-                return chosen
+                return clean_node(primary, seen_refs)
             else:
                 return {"type": "string", "nullable": True}
 
@@ -198,7 +191,14 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
                 continue
             cleaned[key] = clean_node(val, seen_refs)
 
-        # Ensure type is present
+        # Handle array of types like type: ["string", "null"]
+        if "type" in cleaned and isinstance(cleaned["type"], list):
+            types = [t for t in cleaned["type"] if t != "null"]
+            if "null" in cleaned["type"]:
+                cleaned["nullable"] = True
+            cleaned["type"] = str(types[0]) if types else "string"
+
+        # Ensure type is present and valid
         if "type" not in cleaned:
             if "properties" in cleaned:
                 cleaned["type"] = "object"
@@ -208,15 +208,30 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
                 cleaned["type"] = "string"
             else:
                 cleaned["type"] = "object"
+        elif isinstance(cleaned.get("type"), str):
+            cleaned["type"] = cleaned["type"].lower()
+            if cleaned["type"] not in ("string", "number", "integer", "boolean", "array", "object"):
+                cleaned["type"] = "string"
 
-        # If type is array, items MUST be present
-        if cleaned.get("type") == "array" and "items" not in cleaned:
-            cleaned["items"] = {"type": "string"}
+        # If type is array, items MUST be present and must be a dict
+        if cleaned.get("type") == "array":
+            if "items" not in cleaned or not isinstance(cleaned["items"], dict):
+                cleaned["items"] = {"type": "string"}
 
-        # If type is object, properties should be present
+        # If type is object, properties should be present and every value must be an object
         if cleaned.get("type") == "object":
-            if "properties" not in cleaned:
+            if "properties" not in cleaned or not isinstance(cleaned["properties"], dict):
                 cleaned["properties"] = {}
+            else:
+                clean_props: Dict[str, Any] = {}
+                for prop_k, prop_v in cleaned["properties"].items():
+                    if isinstance(prop_v, dict):
+                        clean_props[prop_k] = prop_v
+                    elif isinstance(prop_v, str):
+                        clean_props[prop_k] = {"type": prop_v.lower() if prop_v.lower() in ("string", "number", "integer", "boolean", "array", "object") else "string"}
+                    else:
+                        clean_props[prop_k] = {"type": "string"}
+                cleaned["properties"] = clean_props
 
         # Clean required list
         if "required" in cleaned and isinstance(cleaned["required"], list):
