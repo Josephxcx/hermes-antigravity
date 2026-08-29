@@ -14,6 +14,7 @@ from hermes_antigravity import (
     command_antigravity_auth,
     command_antigravity_doctor,
     command_antigravity_quota,
+    register,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "command_antigravity_auth",
     "command_antigravity_quota",
     "command_antigravity_doctor",
+    "register",
 ]
