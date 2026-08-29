@@ -107,6 +107,53 @@ def test_build_gemini_request_tool_calling():
     assert contents[2]["parts"][0]["functionResponse"]["name"] == "get_weather"
 
 
+def test_build_gemini_request_tool_calling_implicit_name_and_batching():
+    openai_req = {
+        "model": "gemini-3.7-flash",
+        "messages": [
+            {"role": "user", "content": "Fetch data"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {"name": "query_alpha", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {"name": "query_beta", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_a",
+                "content": "res_a",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_b",
+                "content": "res_b",
+            },
+        ],
+    }
+    runtime_model, envelope = build_gemini_request(openai_req, "proj-abc")
+    contents = envelope["request"]["contents"]
+
+    assert len(contents) == 3
+    assert contents[1]["role"] == "model"
+    assert len(contents[1]["parts"]) == 2
+
+    assert contents[2]["role"] == "user"
+    # Both tool responses should be grouped in the single user turn and have correct tool names
+    assert len(contents[2]["parts"]) == 2
+    assert contents[2]["parts"][0]["functionResponse"]["name"] == "query_alpha"
+    assert contents[2]["parts"][1]["functionResponse"]["name"] == "query_beta"
+
+
 def test_thought_signature_injection():
     record_thought_signature("test_sig_abc123", tool_id="call_999", fn_name="test_tool", args={"x": 1})
 

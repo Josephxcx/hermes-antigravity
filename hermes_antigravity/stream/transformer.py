@@ -299,6 +299,8 @@ def build_gemini_request(
         {"text": ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION},
     ]
 
+    tool_call_id_to_name: Dict[str, str] = {}
+
     messages = openai_req.get("messages", [])
     for msg in messages:
         role = msg.get("role")
@@ -361,6 +363,11 @@ def build_gemini_request(
                     args = args_raw or {}
 
                 call_id = tc.get("id") or sanitize_tool_call_id(None, fn_name)
+                if call_id and fn_name:
+                    tool_call_id_to_name[call_id] = fn_name
+                    sanitized_id = sanitize_tool_call_id(call_id, fn_name)
+                    tool_call_id_to_name[sanitized_id] = fn_name
+
                 fn_part: Dict[str, Any] = {
                     "functionCall": {
                         "name": fn_name,
@@ -386,7 +393,12 @@ def build_gemini_request(
 
         elif role == "tool":
             tool_call_id = msg.get("tool_call_id")
-            name = msg.get("name") or "tool"
+            name = (
+                msg.get("name")
+                or (tool_call_id_to_name.get(tool_call_id) if tool_call_id else None)
+                or (tool_call_id_to_name.get(sanitize_tool_call_id(tool_call_id, "tool")) if tool_call_id else None)
+                or "tool"
+            )
             tool_resp_str = content if isinstance(content, str) else json.dumps(content or {})
             resp_part: Dict[str, Any] = {
                 "functionResponse": {
@@ -396,7 +408,11 @@ def build_gemini_request(
             }
             if needs_tool_call_id(raw_model, runtime_model):
                 resp_part["functionResponse"]["id"] = sanitize_tool_call_id(tool_call_id, name)
-            contents.append({"role": "user", "parts": [resp_part]})
+
+            if contents and contents[-1].get("role") == "user" and any("functionResponse" in p for p in contents[-1].get("parts", [])):
+                contents[-1]["parts"].append(resp_part)
+            else:
+                contents.append({"role": "user", "parts": [resp_part]})
 
     # Ensure conversation starts with user turn for Google API compatibility
     if contents and contents[0].get("role") == "model":
