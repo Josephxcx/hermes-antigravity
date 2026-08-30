@@ -45,3 +45,86 @@ Embedded Asyncio Proxy
   ├── Google Cloud Code Assist Client (Headers, Project ID, Auth Bearer)
   └── SSE Stream Decoder (Extracts thinking/reasoning_content & tool_calls)
 ```
+
+---
+
+## Installation & Setup
+
+### 1. Automated Install (Recommended)
+
+Run the included installer script:
+
+```bash
+git clone https://github.com/Josephxcx/hermes-antigravity-pi-port.git
+cd hermes-antigravity-pi-port
+./scripts/install.sh
+```
+
+This script:
+- Locates your Hermes Python virtual environment (`~/.hermes/hermes-agent/venv`).
+- Installs the plugin in editable mode with the `hermes_agent.plugins` entry point.
+- Creates directory symlinks under `~/.hermes/plugins/model-providers/antigravity` and `~/.hermes/plugins/antigravity`.
+- Runs a diagnostic check.
+
+### 2. Manual Installation
+
+If you prefer manual setup:
+
+```bash
+# In Hermes's virtual environment:
+~/.hermes/hermes-agent/venv/bin/pip install -e .
+
+# Create persistent model-providers directory symlink:
+mkdir -p ~/.hermes/plugins/model-providers
+ln -sfn "$(pwd)" ~/.hermes/plugins/model-providers/antigravity
+```
+
+---
+
+## Hermes Update Resilience
+
+This plugin is designed to persist across Hermes updates (`hermes update` / git pulls):
+1. **Directory Symlinks**: The link in `~/.hermes/plugins/model-providers/` resides outside the `~/.hermes/hermes-agent` git repository and will not be overwritten by upstream updates.
+2. **Schema Sanitization**: Tool schemas are strictly sanitized against the Google Cloud Code Assist OpenAPI subset (`ALLOWED_GEMINI_SCHEMA_KEYS`). Any new JSON Schema validation keywords (e.g. `minItems`, `maxItems`, `pattern`) added by future Hermes tool updates are automatically and safely stripped.
+3. **If Hermes re-creates its venv**: Simply re-run `./scripts/install.sh` to reinstall the pip entry point into the new venv.
+
+---
+
+## Usage
+
+### Run with Hermes CLI
+
+```bash
+# One-shot command
+hermes -z "Explain quantum entanglement in 2 sentences" --provider antigravity -m gemini-3.7-flash
+
+# Interactive chat
+hermes --provider antigravity -m claude-sonnet-4-6
+```
+
+### Supported Models
+
+- `gemini-3.7-flash` (supports reasoning/thinking effort)
+- `claude-sonnet-4-6`
+- `claude-opus-4-6`
+- `gemini-3.1-pro`
+- `gemini-3.6-flash`
+- `gemini-3.5-flash`
+- `gpt-oss-120b`
+
+---
+
+## Development & Testing
+
+Run the test suite using `uv`:
+
+```bash
+uv run --extra dev pytest
+```
+
+Run the live authenticated smoke test:
+
+```bash
+uv run python scripts/smoke_test.py
+```
+
