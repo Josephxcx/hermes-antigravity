@@ -343,3 +343,81 @@ def test_inline_and_sanitize_schema_allof_merging():
     assert "foo" in sanitized["required"]
     assert "bar" in sanitized["required"]
 
+
+def test_inline_and_sanitize_schema_strips_unsupported_validation_keys():
+    raw_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "questions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "description": "List of questions",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "choices": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "maxItems": 4,
+                        },
+                        "score": {"type": "number", "minimum": 0.0, "maximum": 100.0},
+                    },
+                    "required": ["question"],
+                },
+            }
+        },
+        "required": ["questions"],
+    }
+
+    sanitized = inline_and_sanitize_schema(raw_schema)
+
+    assert sanitized["type"] == "object"
+    assert "additionalProperties" not in sanitized
+    assert "questions" in sanitized["properties"]
+
+    q_prop = sanitized["properties"]["questions"]
+    assert q_prop["type"] == "array"
+    assert "minItems" not in q_prop
+    assert "maxItems" not in q_prop
+    assert q_prop["description"] == "List of questions"
+
+    item_schema = q_prop["items"]
+    assert item_schema["type"] == "object"
+    assert "question" in item_schema["properties"]
+    assert "choices" in item_schema["properties"]
+    assert "score" in item_schema["properties"]
+
+    # Verify nested properties do not contain unsupported keys
+    assert "minLength" not in item_schema["properties"]["question"]
+    assert "maxLength" not in item_schema["properties"]["question"]
+    assert "minItems" not in item_schema["properties"]["choices"]
+    assert "maxItems" not in item_schema["properties"]["choices"]
+    assert "minimum" not in item_schema["properties"]["score"]
+    assert "maximum" not in item_schema["properties"]["score"]
+
+
+def test_inline_and_sanitize_schema_properties_mapping_integrity():
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "preset": {
+                "type": "string",
+                "description": "Layout preset",
+            }
+        },
+        "required": ["preset"],
+    }
+
+    sanitized = inline_and_sanitize_schema(raw_schema)
+
+    # The properties map must strictly only contain the property names ('preset'),
+    # not internal schema keywords like 'type' or 'properties'.
+    assert set(sanitized["properties"].keys()) == {"preset"}
+    assert sanitized["properties"]["preset"]["type"] == "string"
+    assert sanitized["properties"]["preset"]["description"] == "Layout preset"
+
+
