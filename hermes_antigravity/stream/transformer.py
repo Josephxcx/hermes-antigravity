@@ -96,6 +96,18 @@ def needs_tool_call_id(model_id: str, runtime_model: str) -> bool:
     )
 
 
+ALLOWED_GEMINI_SCHEMA_KEYS = {
+    "type",
+    "format",
+    "description",
+    "nullable",
+    "enum",
+    "properties",
+    "required",
+    "items",
+}
+
+
 def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
     """Recursively dereferences $defs/definitions/$ref and cleans JSON Schemas
 
@@ -184,19 +196,49 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
 
         cleaned: Dict[str, Any] = {}
 
-        # Copy and clean attributes
+        # Copy and clean attributes strictly within allowed Gemini OpenAPI keys
         for key, val in node.items():
-            # Skip disallowed Gemini OpenAPI meta keys
-            if key in ("$defs", "definitions", "$schema", "$id", "title", "additionalProperties", "default"):
+            if key not in ALLOWED_GEMINI_SCHEMA_KEYS:
                 continue
-            cleaned[key] = clean_node(val, seen_refs)
-
-        # Handle array of types like type: ["string", "null"]
-        if "type" in cleaned and isinstance(cleaned["type"], list):
-            types = [t for t in cleaned["type"] if t != "null"]
-            if "null" in cleaned["type"]:
-                cleaned["nullable"] = True
-            cleaned["type"] = str(types[0]) if types else "string"
+            if key == "properties":
+                if isinstance(val, dict):
+                    clean_props: Dict[str, Any] = {}
+                    for prop_k, prop_v in val.items():
+                        if isinstance(prop_v, dict):
+                            clean_props[str(prop_k)] = clean_node(prop_v, seen_refs)
+                        elif isinstance(prop_v, str):
+                            clean_props[str(prop_k)] = {"type": prop_v.lower() if prop_v.lower() in ("string", "number", "integer", "boolean", "array", "object") else "string"}
+                        else:
+                            clean_props[str(prop_k)] = {"type": "string"}
+                    cleaned["properties"] = clean_props
+                else:
+                    cleaned["properties"] = {}
+            elif key == "items":
+                if isinstance(val, dict):
+                    cleaned["items"] = clean_node(val, seen_refs)
+                else:
+                    cleaned["items"] = {"type": "string"}
+            elif key == "enum":
+                if isinstance(val, list):
+                    cleaned["enum"] = [str(x) for x in val]
+            elif key == "description":
+                if val is not None:
+                    cleaned["description"] = str(val)
+            elif key == "format":
+                if isinstance(val, str):
+                    cleaned["format"] = val
+            elif key == "nullable":
+                if isinstance(val, bool):
+                    cleaned["nullable"] = val
+            elif key == "type":
+                if isinstance(val, list):
+                    types = [t for t in val if t != "null"]
+                    if "null" in val:
+                        cleaned["nullable"] = True
+                    cleaned["type"] = str(types[0]) if types else "string"
+                elif isinstance(val, str):
+                    t_lower = val.lower()
+                    cleaned["type"] = t_lower if t_lower in ("string", "number", "integer", "boolean", "array", "object") else "string"
 
         # Ensure type is present and valid
         if "type" not in cleaned:
@@ -208,10 +250,6 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
                 cleaned["type"] = "string"
             else:
                 cleaned["type"] = "object"
-        elif isinstance(cleaned.get("type"), str):
-            cleaned["type"] = cleaned["type"].lower()
-            if cleaned["type"] not in ("string", "number", "integer", "boolean", "array", "object"):
-                cleaned["type"] = "string"
 
         # If type is array, items MUST be present and must be a dict
         if cleaned.get("type") == "array":
@@ -222,28 +260,17 @@ def inline_and_sanitize_schema(schema: Any) -> Dict[str, Any]:
         if cleaned.get("type") == "object":
             if "properties" not in cleaned or not isinstance(cleaned["properties"], dict):
                 cleaned["properties"] = {}
-            else:
-                clean_props: Dict[str, Any] = {}
-                for prop_k, prop_v in cleaned["properties"].items():
-                    if isinstance(prop_v, dict):
-                        clean_props[prop_k] = prop_v
-                    elif isinstance(prop_v, str):
-                        clean_props[prop_k] = {"type": prop_v.lower() if prop_v.lower() in ("string", "number", "integer", "boolean", "array", "object") else "string"}
-                    else:
-                        clean_props[prop_k] = {"type": "string"}
-                cleaned["properties"] = clean_props
 
         # Clean required list
-        if "required" in cleaned and isinstance(cleaned["required"], list):
+        if "required" in node and isinstance(node["required"], list):
             valid_required = []
             props = cleaned.get("properties", {})
-            for r in cleaned["required"]:
+            for r in node["required"]:
                 if isinstance(r, str) and (r in props or not props):
                     if r not in valid_required:
                         valid_required.append(r)
-            cleaned["required"] = valid_required
-            if not valid_required:
-                cleaned.pop("required", None)
+            if valid_required:
+                cleaned["required"] = valid_required
 
         return cleaned
 
