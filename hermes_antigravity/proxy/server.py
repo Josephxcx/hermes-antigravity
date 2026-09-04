@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
 import time
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import httpx
 import uvicorn
@@ -16,7 +17,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from hermes_antigravity.auth.oauth import ensure_valid_credentials
+from hermes_antigravity.auth.oauth import (
+    ensure_valid_credentials,
+    refresh_access_token,
+)
 from hermes_antigravity.client.client import (
     ENDPOINT_FALLBACKS,
     antigravity_headers,
@@ -32,9 +36,34 @@ from hermes_antigravity.stream.transformer import (
 logger = logging.getLogger(__name__)
 DEFAULT_PROXY_PORT = 51122
 
-
 MAX_RETRIES_PER_ENDPOINT = 3
 BASE_BACKOFF_SECS = 1.0
+
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def get_proxy_client() -> httpx.AsyncClient:
+    """Returns or creates the shared persistent httpx AsyncClient with connection pooling."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        limits = httpx.Limits(
+            max_keepalive_connections=20,
+            max_connections=50,
+            keepalive_expiry=30.0,
+        )
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=limits,
+        )
+    return _shared_client
+
+
+async def close_proxy_client() -> None:
+    """Closes the shared persistent httpx AsyncClient."""
+    global _shared_client
+    if _shared_client is not None and not _shared_client.is_closed:
+        await _shared_client.aclose()
+        _shared_client = None
 
 
 def is_retryable_status(status_code: int, error_text: str = "") -> bool:
@@ -65,6 +94,12 @@ async def handle_models(request: Request) -> JSONResponse:
     return JSONResponse({"object": "list", "data": models_data})
 
 
+async def _extract_lines(resp: httpx.Response) -> AsyncGenerator[str, None]:
+    async for line in resp.aiter_lines():
+        if line:
+            yield line
+
+
 async def handle_chat_completions(request: Request) -> JSONResponse | StreamingResponse:
     try:
         body = await request.json()
@@ -88,52 +123,65 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
 
     is_stream = bool(body.get("stream", False))
     model_name = body.get("model", "gemini-3.7-flash")
+    client = get_proxy_client()
 
     # Handle Non-Streaming requests
     if not is_stream:
         last_status = 500
         last_err_text = ""
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                for endpoint in ENDPOINT_FALLBACKS:
-                    url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
-                    for attempt in range(MAX_RETRIES_PER_ENDPOINT):
-                        try:
-                            async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
-                                if g_resp.status_code == 200:
-                                    async def line_gen():
-                                        async for line in g_resp.aiter_lines():
-                                            if line:
-                                                yield line
+        refreshed_on_401 = False
 
-                                    openai_response = await aggregate_google_sse_to_openai_response(
-                                        line_gen(), model_name
-                                    )
-                                    return JSONResponse(openai_response)
-                                else:
-                                    last_status = g_resp.status_code
-                                    err_bytes = await g_resp.aread()
-                                    last_err_text = err_bytes.decode("utf-8", errors="replace")
-                                    logger.warning(
-                                        "Non-stream endpoint %s attempt %d failed (%d): %s",
-                                        endpoint,
-                                        attempt + 1,
-                                        last_status,
-                                        last_err_text,
-                                    )
-                                    if not is_retryable_status(last_status, last_err_text):
-                                        break
-                                    if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                                        await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
-                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+        try:
+            for endpoint in ENDPOINT_FALLBACKS:
+                url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
+                attempt = 0
+                while attempt < MAX_RETRIES_PER_ENDPOINT:
+                    try:
+                        async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
+                            if g_resp.status_code == 200:
+                                openai_response = await aggregate_google_sse_to_openai_response(
+                                    _extract_lines(g_resp), model_name
+                                )
+                                return JSONResponse(openai_response)
+
+                            last_status = g_resp.status_code
+                            err_bytes = await g_resp.aread()
+                            last_err_text = err_bytes.decode("utf-8", errors="replace")
                             logger.warning(
-                                "Network error in non-stream %s (attempt %d): %s",
+                                "Non-stream endpoint %s attempt %d failed (%d): %s",
                                 endpoint,
                                 attempt + 1,
-                                net_err,
+                                last_status,
+                                last_err_text,
                             )
+
+                            # Handle in-flight 401 token refresh retry
+                            if last_status == 401 and creds.refresh_token and not refreshed_on_401:
+                                logger.info("Upstream returned 401 Unauthorized; attempting in-flight token refresh...")
+                                try:
+                                    creds = await refresh_access_token(creds)
+                                    headers = antigravity_headers(creds.access_token)
+                                    if body.get("model", "").lower().startswith("claude-"):
+                                        headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+                                    refreshed_on_401 = True
+                                    continue
+                                except Exception as refresh_err:
+                                    logger.warning("In-flight token refresh failed: %s", refresh_err)
+
+                            if not is_retryable_status(last_status, last_err_text):
+                                break
                             if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
                                 await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                    except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                        logger.warning(
+                            "Network error in non-stream %s (attempt %d): %s",
+                            endpoint,
+                            attempt + 1,
+                            net_err,
+                        )
+                        if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                            await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                    attempt += 1
 
             return JSONResponse(
                 {
@@ -154,57 +202,69 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
 
     # Handle Streaming requests
     async def sse_generator():
-        async def line_generator(httpx_response: httpx.Response):
-            async for line in httpx_response.aiter_lines():
-                if line:
-                    yield line
-
         success = False
         last_err_text = ""
         last_status = 500
+        refreshed_on_401 = False
+        current_headers = dict(headers)
+        current_creds = creds
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                for endpoint in ENDPOINT_FALLBACKS:
-                    if success:
-                        break
-                    url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
+            for endpoint in ENDPOINT_FALLBACKS:
+                if success:
+                    break
+                url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
+                attempt = 0
 
-                    for attempt in range(MAX_RETRIES_PER_ENDPOINT):
-                        try:
-                            async with client.stream("POST", url, headers=headers, json=envelope) as g_resp:
-                                if g_resp.status_code == 200:
-                                    success = True
-                                    async for chunk in transform_google_sse_to_openai(line_generator(g_resp), model_name):
-                                        yield chunk.encode("utf-8")
-                                    break
-                                else:
-                                    last_status = g_resp.status_code
-                                    err_bytes = await g_resp.aread()
-                                    last_err_text = err_bytes.decode("utf-8", errors="replace")
-                                    logger.warning(
-                                        "Endpoint %s attempt %d failed (%d): %s",
-                                        endpoint,
-                                        attempt + 1,
-                                        last_status,
-                                        last_err_text,
-                                    )
+                while attempt < MAX_RETRIES_PER_ENDPOINT:
+                    try:
+                        async with client.stream("POST", url, headers=current_headers, json=envelope) as g_resp:
+                            if g_resp.status_code == 200:
+                                success = True
+                                async for chunk in transform_google_sse_to_openai(_extract_lines(g_resp), model_name):
+                                    yield chunk.encode("utf-8")
+                                break
 
-                                    if not is_retryable_status(last_status, last_err_text):
-                                        break
-
-                                    if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                                        backoff = BASE_BACKOFF_SECS * (2**attempt)
-                                        await asyncio.sleep(backoff)
-                        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                            last_status = g_resp.status_code
+                            err_bytes = await g_resp.aread()
+                            last_err_text = err_bytes.decode("utf-8", errors="replace")
                             logger.warning(
-                                "Network error connecting to %s (attempt %d): %s",
+                                "Endpoint %s attempt %d failed (%d): %s",
                                 endpoint,
                                 attempt + 1,
-                                net_err,
+                                last_status,
+                                last_err_text,
                             )
+
+                            # Handle in-flight 401 token refresh retry
+                            if last_status == 401 and current_creds.refresh_token and not refreshed_on_401:
+                                logger.info("Upstream streaming returned 401; attempting in-flight token refresh...")
+                                try:
+                                    current_creds = await refresh_access_token(current_creds)
+                                    current_headers = antigravity_headers(current_creds.access_token)
+                                    if body.get("model", "").lower().startswith("claude-"):
+                                        current_headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+                                    refreshed_on_401 = True
+                                    continue
+                                except Exception as refresh_err:
+                                    logger.warning("In-flight streaming token refresh failed: %s", refresh_err)
+
+                            if not is_retryable_status(last_status, last_err_text):
+                                break
+
                             if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                                await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                                backoff = BASE_BACKOFF_SECS * (2**attempt)
+                                await asyncio.sleep(backoff)
+                    except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
+                        logger.warning(
+                            "Network error connecting to %s (attempt %d): %s",
+                            endpoint,
+                            attempt + 1,
+                            net_err,
+                        )
+                        if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
+                            await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                    attempt += 1
 
             if not success:
                 err_chunk = {
@@ -234,13 +294,19 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
     )
 
 
+@contextlib.asynccontextmanager
+async def lifespan(app_instance: Starlette):
+    yield
+    await close_proxy_client()
+
+
 routes = [
     Route("/health", handle_health, methods=["GET"]),
     Route("/v1/models", handle_models, methods=["GET"]),
     Route("/v1/chat/completions", handle_chat_completions, methods=["POST"]),
 ]
 
-app = Starlette(debug=False, routes=routes)
+app = Starlette(debug=False, routes=routes, lifespan=lifespan)
 
 
 class BackgroundServer:

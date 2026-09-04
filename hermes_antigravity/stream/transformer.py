@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
@@ -28,11 +29,11 @@ ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION = (
     "or your thinking/personality preambles in the final response. Output only the final response."
 )
 
-_tool_call_counter = 0
-
 # Cache for cryptographic thoughtSignatures returned by Google for tool calls
 _SIGNATURE_CACHE_SIZE = 2000
+_signature_lock = threading.Lock()
 _signature_by_id: collections.OrderedDict[str, str] = collections.OrderedDict()
+_signature_by_call_key: collections.OrderedDict[str, str] = collections.OrderedDict()
 _signature_by_fn_name: collections.OrderedDict[str, str] = collections.OrderedDict()
 _last_thought_signature: Optional[str] = None
 
@@ -46,17 +47,27 @@ def record_thought_signature(
     global _last_thought_signature
     if not signature:
         return
-    _last_thought_signature = signature
+    with _signature_lock:
+        _last_thought_signature = signature
 
-    if tool_id:
-        _signature_by_id[tool_id] = signature
-        if len(_signature_by_id) > _SIGNATURE_CACHE_SIZE:
-            _signature_by_id.popitem(last=False)
+        if tool_id:
+            _signature_by_id[tool_id] = signature
+            if len(_signature_by_id) > _SIGNATURE_CACHE_SIZE:
+                _signature_by_id.popitem(last=False)
 
-    if fn_name:
-        _signature_by_fn_name[fn_name] = signature
-        if len(_signature_by_fn_name) > _SIGNATURE_CACHE_SIZE:
-            _signature_by_fn_name.popitem(last=False)
+        if fn_name:
+            _signature_by_fn_name[fn_name] = signature
+            if len(_signature_by_fn_name) > _SIGNATURE_CACHE_SIZE:
+                _signature_by_fn_name.popitem(last=False)
+
+        if fn_name and args is not None:
+            try:
+                args_key = f"{fn_name}:{json.dumps(args, sort_keys=True, default=str)}"
+                _signature_by_call_key[args_key] = signature
+                if len(_signature_by_call_key) > _SIGNATURE_CACHE_SIZE:
+                    _signature_by_call_key.popitem(last=False)
+            except Exception:
+                pass
 
 
 def retrieve_thought_signature(
@@ -64,23 +75,30 @@ def retrieve_thought_signature(
     fn_name: Optional[str] = None,
     args: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    if tool_id and tool_id in _signature_by_id:
-        return _signature_by_id[tool_id]
+    with _signature_lock:
+        if tool_id and tool_id in _signature_by_id:
+            return _signature_by_id[tool_id]
 
-    if fn_name and fn_name in _signature_by_fn_name:
-        return _signature_by_fn_name[fn_name]
+        if fn_name and args is not None:
+            try:
+                args_key = f"{fn_name}:{json.dumps(args, sort_keys=True, default=str)}"
+                if args_key in _signature_by_call_key:
+                    return _signature_by_call_key[args_key]
+            except Exception:
+                pass
 
-    return _last_thought_signature
+        if fn_name and fn_name in _signature_by_fn_name:
+            return _signature_by_fn_name[fn_name]
+
+        return _last_thought_signature
 
 
 def sanitize_tool_call_id(tool_id: Optional[str], fallback_name: str = "tool") -> str:
-    global _tool_call_counter
     if tool_id:
-        cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id)[:64]
+        cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", str(tool_id))[:64]
         if cleaned:
             return cleaned
-    _tool_call_counter += 1
-    return f"{fallback_name}_{int(time.time())}_{_tool_call_counter}"
+    return f"{fallback_name}_{uuid.uuid4().hex[:8]}"
 
 
 def needs_tool_call_id(model_id: str, runtime_model: str) -> bool:

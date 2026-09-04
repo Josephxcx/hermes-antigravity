@@ -10,6 +10,7 @@ from hermes_antigravity.stream.transformer import (
     inline_and_sanitize_schema,
     record_thought_signature,
     retrieve_thought_signature,
+    sanitize_tool_call_id,
     transform_google_sse_to_openai,
 )
 
@@ -60,7 +61,7 @@ def test_build_gemini_request_tool_calling():
                         "type": "function",
                         "function": {
                             "name": "get_weather",
-                            "arguments": '{"location": "Tokyo"}',
+                            "arguments": '{\"location\": \"Tokyo\"}',
                         },
                     }
                 ],
@@ -69,7 +70,7 @@ def test_build_gemini_request_tool_calling():
                 "role": "tool",
                 "tool_call_id": "call_123",
                 "name": "get_weather",
-                "content": '{"temp": "22C"}',
+                "content": '{\"temp\": \"22C\"}',
             },
         ],
         "tools": [
@@ -170,7 +171,7 @@ def test_thought_signature_injection():
                         "type": "function",
                         "function": {
                             "name": "test_tool",
-                            "arguments": '{"x": 1}',
+                            "arguments": '{\"x\": 1}',
                         },
                     }
                 ],
@@ -179,7 +180,7 @@ def test_thought_signature_injection():
                 "role": "tool",
                 "tool_call_id": "call_999",
                 "name": "test_tool",
-                "content": '{"result": "ok"}',
+                "content": '{\"result\": \"ok\"}',
             },
         ],
     }
@@ -187,6 +188,29 @@ def test_thought_signature_injection():
     model_turn = envelope["request"]["contents"][1]
     assert "thoughtSignature" in model_turn["parts"][0]
     assert model_turn["parts"][0]["thoughtSignature"] == "test_sig_abc123"
+
+
+def test_thought_signature_argument_level_keying():
+    record_thought_signature("sig_arg_specific", fn_name="search_database", args={"query": "omarchy", "limit": 10})
+
+    # Retrieve with exact matching args
+    retrieved = retrieve_thought_signature(fn_name="search_database", args={"limit": 10, "query": "omarchy"})
+    assert retrieved == "sig_arg_specific"
+
+    # Retrieve by tool_id if provided
+    record_thought_signature("sig_by_id", tool_id="tool_call_xyz")
+    assert retrieve_thought_signature(tool_id="tool_call_xyz") == "sig_by_id"
+
+
+def test_sanitize_tool_call_id_uniqueness():
+    id1 = sanitize_tool_call_id(None, "browser_action")
+    id2 = sanitize_tool_call_id(None, "browser_action")
+    assert id1.startswith("browser_action_")
+    assert id2.startswith("browser_action_")
+    assert id1 != id2
+
+    # Sanitization of invalid chars
+    assert sanitize_tool_call_id("call:123/abc.def") == "call_123_abc_def"
 
 
 @pytest.mark.asyncio
@@ -216,6 +240,7 @@ async def test_transform_google_sse_to_openai_stream():
     # Verify text chunks
     c2 = json.loads(output_chunks[1].replace("data: ", "").strip())
     assert c2["choices"][0]["delta"]["content"] == "Hello "
+
 
 @pytest.mark.asyncio
 async def test_transform_google_sse_with_usage_metadata():
@@ -262,7 +287,6 @@ async def test_aggregate_google_sse_to_openai_response():
     assert choice["finish_reason"] == "stop"
     assert choice["message"]["content"] == "Hello!"
     assert choice["message"]["reasoning_content"] == "Plan: say hello."
-
 
 
 def test_inline_and_sanitize_schema_defs_and_refs():
@@ -419,5 +443,3 @@ def test_inline_and_sanitize_schema_properties_mapping_integrity():
     assert set(sanitized["properties"].keys()) == {"preset"}
     assert sanitized["properties"]["preset"]["type"] == "string"
     assert sanitized["properties"]["preset"]["description"] == "Layout preset"
-
-

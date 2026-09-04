@@ -8,11 +8,32 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
-HERMES_AUTH_PATH = Path.home() / ".hermes" / "auth.json"
+DEFAULT_HERMES_AUTH_PATH = Path.home() / ".hermes" / "auth.json"
+HERMES_AUTH_PATH = DEFAULT_HERMES_AUTH_PATH  # backwards compatibility
+
+
+def get_hermes_auth_paths() -> List[Path]:
+    """Returns candidate auth.json paths in priority order (HERMES_HOME first, then default ~/.hermes)."""
+    paths: List[Path] = []
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        candidate = Path(hermes_home).expanduser() / "auth.json"
+        paths.append(candidate)
+    if DEFAULT_HERMES_AUTH_PATH not in paths:
+        paths.append(DEFAULT_HERMES_AUTH_PATH)
+    return paths
+
+
+def get_default_auth_save_path() -> Path:
+    """Returns the preferred path to save auth credentials (HERMES_HOME if set, else ~/.hermes/auth.json)."""
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        return Path(hermes_home).expanduser() / "auth.json"
+    return DEFAULT_HERMES_AUTH_PATH
 
 
 @dataclass
@@ -53,6 +74,7 @@ class AntigravityCredentials:
 
 
 def load_credentials_from_file(path: Path) -> Optional[AntigravityCredentials]:
+    """Loads Antigravity credentials from a given JSON file (supports top-level and providers dict)."""
     if not path.exists():
         return None
     try:
@@ -64,21 +86,29 @@ def load_credentials_from_file(path: Path) -> Optional[AntigravityCredentials]:
             creds = AntigravityCredentials.from_dict(entry)
             if creds.access_token or creds.refresh_token:
                 return creds
+        elif isinstance(entry, str) and entry.strip():
+            return AntigravityCredentials(
+                access_token=entry.strip(),
+                refresh_token="",
+                expires_at=int((time.time() + 3600) * 1000),
+            )
     except Exception as e:
         logger.warning("Failed to load credentials from %s: %s", path, e)
     return None
 
 
-def save_credentials_to_file(creds: AntigravityCredentials, path: Path = HERMES_AUTH_PATH) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def save_credentials_to_file(creds: AntigravityCredentials, path: Optional[Path] = None) -> None:
+    """Saves Antigravity credentials to JSON file."""
+    target_path = path if path is not None else get_default_auth_save_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict[str, Any] = {}
-    if path.exists():
+    if target_path.exists():
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = json.loads(target_path.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
 
-    existing["antigravity"] = {
+    auth_entry = {
         "type": "oauth",
         "access_token": creds.access_token,
         "refresh_token": creds.refresh_token,
@@ -86,26 +116,30 @@ def save_credentials_to_file(creds: AntigravityCredentials, path: Path = HERMES_
         "email": creds.email,
         "project_id": creds.project_id,
     }
+    existing["antigravity"] = auth_entry
+    if isinstance(existing.get("providers"), dict) and "antigravity" in existing["providers"]:
+        existing["providers"]["antigravity"] = auth_entry
 
-    tmp_path = path.with_suffix(".tmp")
+    tmp_path = target_path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    tmp_path.replace(target_path)
     try:
-        path.chmod(0o600)
+        target_path.chmod(0o600)
     except OSError:
         pass
 
 
 def load_credentials() -> Optional[AntigravityCredentials]:
-    """Loads credentials checking Hermes store and environment variables."""
-    # 1. Check Hermes store (~/.hermes/auth.json)
-    creds = load_credentials_from_file(HERMES_AUTH_PATH)
-    if creds and creds.access_token:
-        return creds
+    """Loads credentials checking Hermes multi-profile stores and environment variables."""
+    # 1. Check Hermes multi-profile stores ($HERMES_HOME/auth.json then ~/.hermes/auth.json)
+    for auth_path in get_hermes_auth_paths():
+        creds = load_credentials_from_file(auth_path)
+        if creds and (creds.access_token or creds.refresh_token):
+            return creds
 
     # 2. Check environment variables
     env_token = os.environ.get("ANTIGRAVITY_TOKEN") or os.environ.get("GOOGLE_ACCESS_TOKEN")
-    if env_token and not env_token.startswith("antigravity-local"):
+    if env_token:
         return AntigravityCredentials(
             access_token=env_token,
             refresh_token="",

@@ -1,6 +1,6 @@
 [project]
 name = "hermes-antigravity-pi-port"
-version = "0.4.1"
+version = "0.4.2"
 description = "Antigravity / Google Cloud Code Assist provider plugin for Hermes Agent"
 authors = [
     { name = "Rahul Arya" },

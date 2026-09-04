@@ -27,7 +27,7 @@ This project is a Python port of [`pi-antigravity`](https://github.com/Rahularya
   - `gemini-3.1-pro`
   - `gpt-oss-120b`
 - **Tool Calling:** Translates OpenAI function call declarations and tool invocation messages to Google Cloud Code Assist format and back.
-- **Quota & Diagnostics:** Commands for `/antigravity.quota` and `/antigravity.doctor`.
+- **Quota & Diagnostics:** Commands for `/antigravity.usage` and `/antigravity.doctor`.
 
 ---
 

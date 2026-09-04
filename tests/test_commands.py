@@ -4,8 +4,10 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from hermes_antigravity import (
+    command_antigravity_auth,
     command_antigravity_doctor,
-    command_antigravity_quota,
+    command_antigravity_usage,
+    register,
 )
 from hermes_antigravity.auth.credentials import AntigravityCredentials
 from hermes_antigravity.usage.usage import format_progress_bar, format_reset_time
@@ -48,7 +50,41 @@ async def test_command_antigravity_doctor_authenticated():
 
 
 @pytest.mark.asyncio
-async def test_command_antigravity_quota_unauthenticated():
+async def test_command_antigravity_usage_unauthenticated():
     with patch("hermes_antigravity.load_credentials", return_value=None):
-        out = await command_antigravity_quota()
+        out = await command_antigravity_usage()
         assert "No Antigravity credentials found" in out
+
+
+def test_plugin_register_with_context():
+    class MockContext:
+        def __init__(self):
+            self.commands = {}
+
+        def register_command(self, name, handler, description=""):
+            self.commands[name] = {"handler": handler, "description": description}
+
+    ctx = MockContext()
+    with patch("hermes_antigravity.register_provider") as mock_reg_provider:
+        register(ctx)
+        mock_reg_provider.assert_called_once()
+
+    assert "antigravity.usage" in ctx.commands
+    assert "antigravity.quota" not in ctx.commands
+    assert "antigravity.doctor" in ctx.commands
+    assert "antigravity.auth" in ctx.commands
+
+    assert ctx.commands["antigravity.usage"]["handler"] == command_antigravity_usage
+    assert ctx.commands["antigravity.doctor"]["handler"] == command_antigravity_doctor
+    assert ctx.commands["antigravity.auth"]["handler"] == command_antigravity_auth
+
+
+def test_plugin_register_without_context():
+    with patch("hermes_antigravity.register_provider") as mock_reg_provider:
+        register()
+        mock_reg_provider.assert_called_once()
+
+    with patch("hermes_antigravity.register_provider") as mock_reg_provider:
+        register(object())
+        mock_reg_provider.assert_called_once()
+

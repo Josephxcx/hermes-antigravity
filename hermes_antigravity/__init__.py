@@ -33,6 +33,8 @@ try:
 except ImportError:
     # Standalone mode fallback for testing outside Hermes runtime
     class ProviderProfile:  # type: ignore
+        auth_type: str = "oauth"
+
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
@@ -43,6 +45,20 @@ except ImportError:
 
 class AntigravityProviderProfile(ProviderProfile):
     """Hermes ProviderProfile for Antigravity."""
+
+    auth_type: str = "oauth"
+
+    def resolve_aux_model(self, *, vision: bool = False) -> str:
+        """Return a live cheap model for auxiliary tasks."""
+        if vision:
+            return "gemini-3.7-flash"
+        return "gemini-3.5-flash"
+
+    def supported_reasoning_efforts(
+        self, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Declared reasoning effort vocabulary for Antigravity models."""
+        return ("off", "minimal", "low", "medium", "high", "xhigh")
 
     def build_api_kwargs_extras(
         self,
@@ -65,7 +81,7 @@ antigravity_profile = AntigravityProviderProfile(
     display_name="Google Antigravity",
     description="Google Cloud Code Assist (Gemini 3.7 Flash, Claude Sonnet 4.6, GPT-OSS 120B)",
     signup_url="https://cloud.google.com/products/gemini/code-assist",
-    auth_type="api_key",
+    auth_type="oauth",
     api_mode="chat_completions",
     base_url="http://127.0.0.1:51122/v1",
     fallback_models=FALLBACK_MODELS,
@@ -73,7 +89,7 @@ antigravity_profile = AntigravityProviderProfile(
     supports_vision=True,
     supports_vision_tool_messages=True,
     supports_health_check=True,
-    env_vars=("ANTIGRAVITY_TOKEN", "GOOGLE_ACCESS_TOKEN"),
+    env_vars=("GOOGLE_ACCESS_TOKEN",),
 )
 
 register_provider(antigravity_profile)
@@ -81,7 +97,25 @@ register_provider(antigravity_profile)
 
 def register(ctx: Any = None) -> None:
     """Hermes Agent plugin registration entry point."""
+    logger.info("Antigravity plugin registered (OAuth provider)")
+
     register_provider(antigravity_profile)
+    if ctx is not None and hasattr(ctx, "register_command"):
+        ctx.register_command(
+            "antigravity.usage",
+            command_antigravity_usage,
+            description="Check Google Antigravity usage and quota",
+        )
+        ctx.register_command(
+            "antigravity.doctor",
+            command_antigravity_doctor,
+            description="Diagnose Google Antigravity connection and tokens",
+        )
+        ctx.register_command(
+            "antigravity.auth",
+            command_antigravity_auth,
+            description="Log in with Google account for Antigravity",
+        )
 
 
 async def command_antigravity_auth(*args, **kwargs) -> str:
@@ -185,8 +219,8 @@ async def command_antigravity_auth(*args, **kwargs) -> str:
     return "❌ Authentication failed for unknown reason." 
 
 
-async def command_antigravity_quota() -> str:
-    """CLI command to show Antigravity quota and tier status."""
+async def command_antigravity_usage(*args: Any, **kwargs: Any) -> str:
+    """CLI command to show Antigravity usage, quota, and tier status."""
     creds = load_credentials()
     if not creds:
         return "No Antigravity credentials found. Please authenticate first using /antigravity.auth"
@@ -195,7 +229,7 @@ async def command_antigravity_quota() -> str:
     return await format_quota_report(creds.access_token, project_id, email=creds.email)
 
 
-async def command_antigravity_doctor() -> str:
+async def command_antigravity_doctor(*args: Any, **kwargs: Any) -> str:
     """CLI command to diagnose Antigravity connection and token validity."""
     creds = load_credentials()
     if not creds:
@@ -217,3 +251,13 @@ async def command_antigravity_doctor() -> str:
         status_lines.append(f"In-process Proxy: Error ({e})")
 
     return "\n".join(status_lines)
+
+
+__all__ = [
+    "antigravity_profile",
+    "AntigravityProviderProfile",
+    "command_antigravity_auth",
+    "command_antigravity_doctor",
+    "command_antigravity_usage",
+    "register",
+]
