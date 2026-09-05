@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 ENDPOINT_FALLBACKS = [
     DEFAULT_ENDPOINT,
-    "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ]
 
 PROJECT_CACHE_TTL = 1800  # 30 minutes

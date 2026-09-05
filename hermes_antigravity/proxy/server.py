@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 import threading
 import time
 from typing import AsyncGenerator, Optional
@@ -36,8 +37,9 @@ from hermes_antigravity.stream.transformer import (
 logger = logging.getLogger(__name__)
 DEFAULT_PROXY_PORT = 51122
 
-MAX_RETRIES_PER_ENDPOINT = 3
-BASE_BACKOFF_SECS = 1.0
+MAX_RETRIES_PER_ENDPOINT = 5
+BASE_BACKOFF_SECS = 2.0
+MAX_BACKOFF_SECS = 30.0
 
 _shared_client: Optional[httpx.AsyncClient] = None
 
@@ -64,6 +66,17 @@ async def close_proxy_client() -> None:
     if _shared_client is not None and not _shared_client.is_closed:
         await _shared_client.aclose()
         _shared_client = None
+
+
+def _backoff_delay(attempt: int, status_code: int = 0) -> float:
+    """Computes exponential backoff with jitter. Longer delays for 429 quota exhaustion."""
+    base = BASE_BACKOFF_SECS * (2 ** attempt)
+    if status_code == 429:
+        base = max(base, 5.0)  # minimum 5s for rate limits
+    capped = min(base, MAX_BACKOFF_SECS)
+    # Add ±25% jitter to avoid thundering herd
+    jitter = capped * random.uniform(-0.25, 0.25)
+    return max(0.5, capped + jitter)
 
 
 def is_retryable_status(status_code: int, error_text: str = "") -> bool:
@@ -116,6 +129,9 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
         creds.access_token, seed=creds.email or "antigravity-default"
     )
     runtime_model, envelope = build_gemini_request(body, project_id)
+    
+    with open("/tmp/proxy_debug.json", "w") as f:
+        json.dump(envelope, f)
 
     headers = antigravity_headers(creds.access_token)
     if body.get("model", "").lower().startswith("claude-"):
@@ -171,7 +187,7 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
                             if not is_retryable_status(last_status, last_err_text):
                                 break
                             if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                                await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                                await asyncio.sleep(_backoff_delay(attempt, last_status))
                     except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
                         logger.warning(
                             "Network error in non-stream %s (attempt %d): %s",
@@ -180,7 +196,7 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
                             net_err,
                         )
                         if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                            await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                            await asyncio.sleep(_backoff_delay(attempt))
                     attempt += 1
 
             return JSONResponse(
@@ -253,8 +269,7 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
                                 break
 
                             if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                                backoff = BASE_BACKOFF_SECS * (2**attempt)
-                                await asyncio.sleep(backoff)
+                                await asyncio.sleep(_backoff_delay(attempt, last_status))
                     except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as net_err:
                         logger.warning(
                             "Network error connecting to %s (attempt %d): %s",
@@ -263,7 +278,7 @@ async def handle_chat_completions(request: Request) -> JSONResponse | StreamingR
                             net_err,
                         )
                         if attempt < MAX_RETRIES_PER_ENDPOINT - 1:
-                            await asyncio.sleep(BASE_BACKOFF_SECS * (2**attempt))
+                            await asyncio.sleep(_backoff_delay(attempt))
                     attempt += 1
 
             if not success:

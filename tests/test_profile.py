@@ -8,7 +8,7 @@ from hermes_antigravity import AntigravityProviderProfile, antigravity_profile
 
 def test_antigravity_profile_attributes():
     assert antigravity_profile.name == "antigravity"
-    assert antigravity_profile.auth_type == "oauth"
+    assert antigravity_profile.auth_type == "oauth_external"
     assert antigravity_profile.supports_vision is True
     assert antigravity_profile.default_aux_model == "gemini-3.8-flash"
 

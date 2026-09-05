@@ -57,13 +57,13 @@ ANTIGRAVITY_ROUTING: Dict[str, Dict[str, Any]] = {
   "gemini-3.7-flash": {
     "off": "gemini-3.7-flash-low",
     "routing": {
-      "minimal": "gemini-3.7-flash-low",
-      "low": "gemini-3.7-flash-low",
-      "medium": "gemini-3.7-flash-medium",
-      "high": "gemini-3.7-flash-high",
-      "xhigh": "gemini-3.7-flash-high",
+      "minimal": "gemini-3.7-flash-tiered",
+      "low": "gemini-3.7-flash-tiered",
+      "medium": "gemini-3.7-flash-tiered",
+      "high": "gemini-3.7-flash-tiered",
+      "xhigh": "gemini-3.7-flash-tiered",
     },
-    "defaultRequestId": "gemini-3.7-flash-medium",
+    "defaultRequestId": "gemini-3.7-flash-tiered",
   },
   "gemini-3.6-flash": {
     "off": "gemini-3.6-flash-low",

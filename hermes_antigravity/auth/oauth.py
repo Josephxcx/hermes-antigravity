@@ -203,7 +203,9 @@ async def ensure_valid_credentials() -> AntigravityCredentials:
             "No Antigravity credentials found. Please run `/antigravity.auth` to authenticate."
         )
 
-    if creds.is_expired():
+    now_ms = int(time.time() * 1000)
+    buffer_ms = 300 * 1000
+    if now_ms >= (creds.expires_at - buffer_ms):
         if creds.refresh_token:
             creds = await refresh_access_token(creds)
         else:

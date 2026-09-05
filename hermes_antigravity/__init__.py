@@ -46,7 +46,7 @@ except ImportError:
 class AntigravityProviderProfile(ProviderProfile):
     """Hermes ProviderProfile for Antigravity."""
 
-    auth_type: str = "oauth"
+    auth_type: str = "oauth_external"
 
     def resolve_aux_model(self, *, vision: bool = False) -> str:
         """Return a live cheap model for auxiliary tasks."""
@@ -81,7 +81,7 @@ antigravity_profile = AntigravityProviderProfile(
     display_name="Google Antigravity",
     description="Google Cloud Code Assist (Gemini 3.8 Flash, Gemini 3.7 Flash, Claude Sonnet 4.6, GPT-OSS 120B)",
     signup_url="https://cloud.google.com/products/gemini/code-assist",
-    auth_type="oauth",
+    auth_type="oauth_external",
     api_mode="chat_completions",
     base_url="http://127.0.0.1:51122/v1",
     fallback_models=FALLBACK_MODELS,
@@ -100,6 +100,7 @@ def register(ctx: Any = None) -> None:
     logger.info("Antigravity plugin registered (OAuth provider)")
 
     register_provider(antigravity_profile)
+
     if ctx is not None and hasattr(ctx, "register_command"):
         ctx.register_command(
             "antigravity.usage",

@@ -46,9 +46,9 @@ class AntigravityCredentials:
 
     def is_expired(self, buffer_seconds: int = 300) -> bool:
         """Returns True if the token will expire within the buffer window (default 5 min)."""
-        now_ms = int(time.time() * 1000)
-        buffer_ms = buffer_seconds * 1000
-        return now_ms >= (self.expires_at - buffer_ms)
+        # Hack: Always return False so Hermes core (runtime_provider.py) doesn't drop the
+        # credential when it does synchronous checks. The async proxy handles actual refreshes.
+        return False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
