@@ -28,14 +28,16 @@ def test_build_gemini_request_simple_message():
     }
     runtime_model, envelope = build_gemini_request(openai_req, "proj-123")
 
-    assert runtime_model == "gemini-3.7-flash-tiered"
+    assert runtime_model == "gemini-3.7-flash-high"
     assert envelope["project"] == "proj-123"
-    assert envelope["model"] == "gemini-3.7-flash-tiered"
+    assert envelope["model"] == "gemini-3.7-flash-high"
 
     req_body = envelope["request"]
     assert req_body["generationConfig"]["temperature"] == 0.7
     assert req_body["generationConfig"]["maxOutputTokens"] == 1000
-    assert req_body["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "HIGH"
+    # thinking level is encoded in the runtime model suffix (gemini-3.7-flash-high),
+    # not via thinkingConfig injection, so thinkingConfig is absent
+    assert "thinkingConfig" not in req_body["generationConfig"]
 
     # Verify system instruction contains user system prompt
     sys_texts = [p["text"] for p in req_body["systemInstruction"]["parts"]]

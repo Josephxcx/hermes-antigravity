@@ -43,16 +43,27 @@ ANTIGRAVITY_ROUTING: Dict[str, Dict[str, Any]] = {
     },
     "defaultRequestId": "gemini-3.1-pro-low",
   },
-  "gemini-3.7-flash": {
-    "off": "gemini-3.7-flash-tiered",
+  "gemini-3.8-flash": {
+    "off": "gemini-3.8-flash-low",
     "routing": {
-      "minimal": "gemini-3.7-flash-tiered",
-      "low": "gemini-3.7-flash-tiered",
-      "medium": "gemini-3.7-flash-tiered",
-      "high": "gemini-3.7-flash-tiered",
-      "xhigh": "gemini-3.7-flash-tiered",
+      "minimal": "gemini-3.8-flash-low",
+      "low": "gemini-3.8-flash-low",
+      "medium": "gemini-3.8-flash-medium",
+      "high": "gemini-3.8-flash-high",
+      "xhigh": "gemini-3.8-flash-high",
     },
-    "defaultRequestId": "gemini-3.7-flash-tiered",
+    "defaultRequestId": "gemini-3.8-flash-medium",
+  },
+  "gemini-3.7-flash": {
+    "off": "gemini-3.7-flash-low",
+    "routing": {
+      "minimal": "gemini-3.7-flash-low",
+      "low": "gemini-3.7-flash-low",
+      "medium": "gemini-3.7-flash-medium",
+      "high": "gemini-3.7-flash-high",
+      "xhigh": "gemini-3.7-flash-high",
+    },
+    "defaultRequestId": "gemini-3.7-flash-medium",
   },
   "gemini-3.6-flash": {
     "off": "gemini-3.6-flash-low",
@@ -89,8 +100,15 @@ ANTIGRAVITY_ROUTING: Dict[str, Dict[str, Any]] = {
 }
 
 RUNTIME_MAX_OUTPUT_TOKENS: Dict[str, int] = {
+  "gemini-3.8-flash": 65536,
+  "gemini-3.8-flash-low": 65536,
+  "gemini-3.8-flash-medium": 65536,
+  "gemini-3.8-flash-high": 65536,
   "gemini-3.7-flash": 65536,
   "gemini-3.7-flash-tiered": 65536,
+  "gemini-3.7-flash-low": 65536,
+  "gemini-3.7-flash-medium": 65536,
+  "gemini-3.7-flash-high": 65536,
   "gemini-3.6-flash": 65536,
   "gemini-3.6-flash-low": 65536,
   "gemini-3.6-flash-medium": 65536,
@@ -111,6 +129,7 @@ RUNTIME_MAX_OUTPUT_TOKENS: Dict[str, int] = {
 }
 
 FALLBACK_MODELS = (
+  "gemini-3.8-flash",
   "gemini-3.7-flash",
   "claude-sonnet-4-6",
   "claude-opus-4-6",

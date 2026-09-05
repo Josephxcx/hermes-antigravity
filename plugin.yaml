@@ -1,7 +1,7 @@
 name: antigravity
 kind: model-provider
-version: 0.4.2
-description: Google Antigravity / Cloud Code Assist provider for Hermes Agent
+version: 0.5.0
+description: Google Antigravity / Cloud Code Assist provider for Hermes Agent (Gemini 3.8 Flash, 3.7 Flash, Claude, GPT-OSS)
 author: Rahul Arya & Hermes Agent Contributors
 provides_commands:
   - antigravity.usage

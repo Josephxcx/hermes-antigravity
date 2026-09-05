@@ -10,7 +10,7 @@ def test_antigravity_profile_attributes():
     assert antigravity_profile.name == "antigravity"
     assert antigravity_profile.auth_type == "oauth"
     assert antigravity_profile.supports_vision is True
-    assert antigravity_profile.default_aux_model == "gemini-3.7-flash"
+    assert antigravity_profile.default_aux_model == "gemini-3.8-flash"
 
 
 def test_antigravity_profile_supported_reasoning_efforts():
@@ -60,7 +60,7 @@ def test_plugin_yaml_manifest():
 
     assert parsed.get("name") == "antigravity"
     assert parsed.get("kind") == "model-provider"
-    assert parsed.get("version") == "0.4.2"
+    assert parsed.get("version") == "0.5.0"
     assert "description" in parsed
     assert "antigravity.usage" in content
     assert "antigravity.quota" not in content

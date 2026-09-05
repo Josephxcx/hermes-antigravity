@@ -1,9 +1,9 @@
 [project]
-name = "hermes-antigravity-pi-port"
-version = "0.4.2"
-description = "Antigravity / Google Cloud Code Assist provider plugin for Hermes Agent"
+name = "hermes-antigravity"
+version = "0.5.0"
+description = "Google Antigravity (Cloud Code Assist) provider plugin for Hermes Agent"
 authors = [
-    { name = "Rahul Arya" },
+    { name = "Joseph" },
     { name = "Hermes Agent Contributors" }
 ]
 readme = "README.md"

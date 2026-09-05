@@ -7,11 +7,19 @@ from hermes_antigravity.models.models import (
 )
 
 
+def test_gemini_38_flash_routing():
+    # Gemini 3.8 uses tiered routing (low/medium/high)
+    assert get_runtime_model_id("gemini-3.8-flash", "high") == "gemini-3.8-flash-high"
+    assert get_runtime_model_id("gemini-3.8-flash", "medium") == "gemini-3.8-flash-medium"
+    assert get_runtime_model_id("gemini-3.8-flash", "low") == "gemini-3.8-flash-low"
+    assert get_runtime_model_id("antigravity/gemini-3.8-flash") == "gemini-3.8-flash-medium"
+
+
 def test_gemini_37_flash_routing():
-    # Gemini 3.7 uses the tiered runtime id
-    assert get_runtime_model_id("gemini-3.7-flash", "high") == "gemini-3.7-flash-tiered"
-    assert get_runtime_model_id("gemini-3.7-flash", "low") == "gemini-3.7-flash-tiered"
-    assert get_runtime_model_id("antigravity/gemini-3.7-flash", "medium") == "gemini-3.7-flash-tiered"
+    # Gemini 3.7 uses tiered routing (low/medium/high)
+    assert get_runtime_model_id("gemini-3.7-flash", "high") == "gemini-3.7-flash-high"
+    assert get_runtime_model_id("gemini-3.7-flash", "low") == "gemini-3.7-flash-low"
+    assert get_runtime_model_id("antigravity/gemini-3.7-flash", "medium") == "gemini-3.7-flash-medium"
 
 
 def test_claude_sonnet_routing():
@@ -34,6 +42,7 @@ def test_gpt_oss_routing():
 
 
 def test_max_output_tokens():
+    assert get_max_output_tokens("gemini-3.8-flash") == 65536
     assert get_max_output_tokens("gemini-3.7-flash") == 65536
     assert get_max_output_tokens("claude-sonnet-4-6") == 64000
     assert get_max_output_tokens("gpt-oss-120b") == 32768
@@ -41,6 +50,7 @@ def test_max_output_tokens():
 
 
 def test_fallback_models_exist():
+    assert "gemini-3.8-flash" in FALLBACK_MODELS
     assert "gemini-3.7-flash" in FALLBACK_MODELS
     assert "claude-sonnet-4-6" in FALLBACK_MODELS
     assert "gemini-3.1-pro" in FALLBACK_MODELS
