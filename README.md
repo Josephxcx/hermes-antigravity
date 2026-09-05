@@ -19,13 +19,15 @@ bash scripts/install.sh
 
 ### 1. Authenticate with Google
 
-Run the auth command in Hermes:
+Run the auth command in Hermes (or inside an active chat session):
 
 ```bash
 hermes /antigravity.auth
 ```
 
 Your default browser will open to complete the Google OAuth PKCE flow on `http://localhost:51121/oauth-callback`. Tokens are saved securely to `~/.hermes/auth.json`.
+
+> **Tip:** You do **not** need to restart Hermes after signing in. In the same running session, you can immediately type `/model`, select **Google Antigravity**, pick any model, and keep chatting.
 
 ### 2. Test It
 
@@ -64,6 +66,13 @@ hermes -z "Review this algorithm for race conditions" --provider antigravity -m 
 # Interactive agent session
 hermes --provider antigravity -m gemini-3.1-pro
 ```
+
+### In-Session Model Picker (`/model`)
+
+Inside any interactive Hermes chat, you can switch models on the fly without restarting:
+1. Type `/model` in chat.
+2. Select **Google Antigravity**.
+3. Choose your desired model (e.g., `gemini-3.8-flash` or `claude-opus-4-6`). Hermes switches immediately.
 
 ### Set as Default Provider
 
