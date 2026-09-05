@@ -16,10 +16,10 @@ def test_gemini_38_flash_routing():
 
 
 def test_gemini_37_flash_routing():
-    # Gemini 3.7 uses tiered routing (low/medium/high)
-    assert get_runtime_model_id("gemini-3.7-flash", "high") == "gemini-3.7-flash-high"
-    assert get_runtime_model_id("gemini-3.7-flash", "low") == "gemini-3.7-flash-low"
-    assert get_runtime_model_id("antigravity/gemini-3.7-flash", "medium") == "gemini-3.7-flash-medium"
+    # Gemini 3.7 uses tiered routing
+    assert get_runtime_model_id("gemini-3.7-flash", "high") == "gemini-3.7-flash-tiered"
+    assert get_runtime_model_id("gemini-3.7-flash", "off") == "gemini-3.7-flash-low"
+    assert get_runtime_model_id("antigravity/gemini-3.7-flash", "medium") == "gemini-3.7-flash-tiered"
 
 
 def test_claude_sonnet_routing():

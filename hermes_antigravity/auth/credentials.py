@@ -46,9 +46,9 @@ class AntigravityCredentials:
 
     def is_expired(self, buffer_seconds: int = 300) -> bool:
         """Returns True if the token will expire within the buffer window (default 5 min)."""
-        # Hack: Always return False so Hermes core (runtime_provider.py) doesn't drop the
-        # credential when it does synchronous checks. The async proxy handles actual refreshes.
-        return False
+        if not self.expires_at:
+            return True
+        return time.time() * 1000 >= (self.expires_at - buffer_seconds * 1000)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -149,3 +149,51 @@ def load_credentials() -> Optional[AntigravityCredentials]:
         )
 
     return None
+
+def resolve_runtime_credentials() -> dict:
+    """Pre-flight credential resolver for Hermes _OAUTH_RUNTIME_PROVIDERS."""
+    creds = load_credentials()
+    if not creds:
+        from hermes_cli.auth import AuthError
+        raise AuthError("No Antigravity credentials found. Run /login antigravity.", provider="antigravity", code="missing_credentials")
+        
+    if creds.is_expired():
+        if not creds.refresh_token:
+            from hermes_cli.auth import AuthError
+            raise AuthError("Antigravity token expired and no refresh token available.", provider="antigravity", code="missing_refresh_token", relogin_required=True)
+            
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Antigravity token expired pre-flight. Refreshing synchronously...")
+        
+        import asyncio
+        import threading
+        from hermes_antigravity.auth.oauth import refresh_access_token
+        
+        def _run_refresh():
+            new_loop = asyncio.new_event_loop()
+            return new_loop.run_until_complete(refresh_access_token(creds))
+            
+        def _thread_target():
+            try:
+                res = _run_refresh()
+                setattr(threading.current_thread(), "res", res)
+            except Exception as e:
+                setattr(threading.current_thread(), "err", e)
+                
+        t = threading.Thread(target=_thread_target)
+        t.start()
+        t.join()
+        
+        if hasattr(t, "err"):
+            from hermes_cli.auth import AuthError
+            raise AuthError("Failed to refresh Antigravity token.", provider="antigravity", code="refresh_failed", relogin_required=True) from getattr(t, "err")
+            
+        creds = getattr(t, "res")
+        save_credentials_to_file(creds)
+            
+    return {
+        "api_key": creds.access_token,
+        "expires_at": creds.expires_at,
+        "source": "oauth",
+    }

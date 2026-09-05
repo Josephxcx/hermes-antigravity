@@ -195,3 +195,26 @@ def test_hermes_home_fallback_to_default(tmp_path: Path, monkeypatch):
         assert loaded is not None
         assert loaded.access_token == "default-token"
         assert loaded.email == "default@example.com"
+
+def test_resolve_runtime_credentials_valid():
+    from hermes_antigravity.auth.credentials import resolve_runtime_credentials, AntigravityCredentials
+    from unittest.mock import patch
+    creds = AntigravityCredentials("acc", "ref", expires_at=9999999999999)
+    with patch("hermes_antigravity.auth.credentials.load_credentials", return_value=creds):
+        res = resolve_runtime_credentials()
+        assert res["api_key"] == "acc"
+
+def test_resolve_runtime_credentials_expired_refresh():
+    from hermes_antigravity.auth.credentials import resolve_runtime_credentials, AntigravityCredentials
+    from unittest.mock import patch
+    import time
+    creds = AntigravityCredentials("acc", "ref", expires_at=time.time()*1000 - 10000)
+    
+    async def mock_refresh(c):
+        return AntigravityCredentials("new_acc", "new_ref", expires_at=9999999999999)
+        
+    with patch("hermes_antigravity.auth.credentials.load_credentials", return_value=creds):
+        with patch("hermes_antigravity.auth.oauth.refresh_access_token", side_effect=mock_refresh):
+            with patch("hermes_antigravity.auth.credentials.save_credentials_to_file"):
+                res = resolve_runtime_credentials()
+                assert res["api_key"] == "new_acc"

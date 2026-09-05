@@ -42,11 +42,10 @@ async def test_command_antigravity_doctor_authenticated():
         project_id="proj-456",
     )
     with patch("hermes_antigravity.load_credentials", return_value=creds):
-        with patch("hermes_antigravity.ensure_proxy_running", return_value="http://127.0.0.1:51122/v1"):
-            out = await command_antigravity_doctor()
-            assert "test@gmail.com" in out
-            assert "Active" in out
-            assert "proj-456" in out
+        out = await command_antigravity_doctor()
+        assert "test@gmail.com" in out
+        assert "Active" in out
+        assert "proj-456" in out
 
 
 @pytest.mark.asyncio

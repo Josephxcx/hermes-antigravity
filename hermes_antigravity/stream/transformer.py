@@ -35,7 +35,6 @@ _signature_lock = threading.Lock()
 _signature_by_id: collections.OrderedDict[str, str] = collections.OrderedDict()
 _signature_by_call_key: collections.OrderedDict[str, str] = collections.OrderedDict()
 _signature_by_fn_name: collections.OrderedDict[str, str] = collections.OrderedDict()
-_last_thought_signature: Optional[str] = None
 
 
 def record_thought_signature(
@@ -44,12 +43,9 @@ def record_thought_signature(
     fn_name: Optional[str] = None,
     args: Optional[Dict[str, Any]] = None,
 ) -> None:
-    global _last_thought_signature
     if not signature:
         return
     with _signature_lock:
-        _last_thought_signature = signature
-
         if tool_id:
             _signature_by_id[tool_id] = signature
             if len(_signature_by_id) > _SIGNATURE_CACHE_SIZE:
@@ -68,7 +64,6 @@ def record_thought_signature(
                     _signature_by_call_key.popitem(last=False)
             except Exception:
                 pass
-
 
 def retrieve_thought_signature(
     tool_id: Optional[str] = None,
@@ -90,7 +85,7 @@ def retrieve_thought_signature(
         if fn_name and fn_name in _signature_by_fn_name:
             return _signature_by_fn_name[fn_name]
 
-        return _last_thought_signature
+        return None
 
 
 def sanitize_tool_call_id(tool_id: Optional[str], fallback_name: str = "tool") -> str:
@@ -507,10 +502,10 @@ def build_gemini_request(
     return runtime_model, envelope
 
 
-async def transform_google_sse_to_openai(
-    response_stream: AsyncGenerator[str, None],
+def transform_google_sse_to_openai(
+    response_stream: Iterator[str],
     model_id: str,
-) -> AsyncGenerator[str, None]:
+) -> Iterator[str]:
     """Decodes Google Cloud Code Assist SSE lines and yields standard OpenAI SSE data chunks."""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created_ts = int(time.time())
@@ -521,7 +516,7 @@ async def transform_google_sse_to_openai(
     finish_chunk_sent = False
     usage_dict: Optional[Dict[str, int]] = None
 
-    async for line in response_stream:
+    for line in response_stream:
         line = line.strip()
         if not line:
             continue
@@ -703,8 +698,8 @@ async def transform_google_sse_to_openai(
     yield "data: [DONE]\n\n"
 
 
-async def aggregate_google_sse_to_openai_response(
-    response_stream: AsyncGenerator[str, None],
+def aggregate_google_sse_to_openai_response(
+    response_stream: Iterator[str],
     model_id: str,
 ) -> Dict[str, Any]:
     """Aggregates Google SSE events into a single non-streaming OpenAI /v1/chat/completions response."""
@@ -717,7 +712,7 @@ async def aggregate_google_sse_to_openai_response(
     finish_reason = "stop"
     usage_dict: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-    async for chunk_str in transform_google_sse_to_openai(response_stream, model_id):
+    for chunk_str in transform_google_sse_to_openai(response_stream, model_id):
         if not chunk_str.startswith("data:"):
             continue
         payload_str = chunk_str[5:].strip()

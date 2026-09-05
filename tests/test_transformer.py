@@ -28,16 +28,15 @@ def test_build_gemini_request_simple_message():
     }
     runtime_model, envelope = build_gemini_request(openai_req, "proj-123")
 
-    assert runtime_model == "gemini-3.7-flash-high"
+    assert runtime_model == "gemini-3.7-flash-tiered"
     assert envelope["project"] == "proj-123"
-    assert envelope["model"] == "gemini-3.7-flash-high"
+    assert envelope["model"] == "gemini-3.7-flash-tiered"
 
     req_body = envelope["request"]
     assert req_body["generationConfig"]["temperature"] == 0.7
     assert req_body["generationConfig"]["maxOutputTokens"] == 1000
-    # thinking level is encoded in the runtime model suffix (gemini-3.7-flash-high),
-    # not via thinkingConfig injection, so thinkingConfig is absent
-    assert "thinkingConfig" not in req_body["generationConfig"]
+    assert "thinkingConfig" in req_body["generationConfig"]
+    assert req_body["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "HIGH"
 
     # Verify system instruction contains user system prompt
     sys_texts = [p["text"] for p in req_body["systemInstruction"]["parts"]]
@@ -215,8 +214,7 @@ def test_sanitize_tool_call_id_uniqueness():
     assert sanitize_tool_call_id("call:123/abc.def") == "call_123_abc_def"
 
 
-@pytest.mark.asyncio
-async def test_transform_google_sse_to_openai_stream():
+def test_transform_google_sse_to_openai_stream():
     google_sse_lines = [
         'data: {"response": {"candidates": [{"content": {"parts": [{"thought": true, "text": "Thinking..."}]}}]}}',
         'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello "}]}}]}}',
@@ -224,12 +222,12 @@ async def test_transform_google_sse_to_openai_stream():
         "data: [DONE]",
     ]
 
-    async def fake_stream():
+    def fake_stream():
         for line in google_sse_lines:
             yield line
 
     output_chunks = []
-    async for chunk_str in transform_google_sse_to_openai(fake_stream(), "gemini-3.7-flash"):
+    for chunk_str in transform_google_sse_to_openai(fake_stream(), "gemini-3.7-flash"):
         output_chunks.append(chunk_str)
 
     assert len(output_chunks) >= 4
@@ -244,20 +242,19 @@ async def test_transform_google_sse_to_openai_stream():
     assert c2["choices"][0]["delta"]["content"] == "Hello "
 
 
-@pytest.mark.asyncio
-async def test_transform_google_sse_with_usage_metadata():
+def test_transform_google_sse_with_usage_metadata():
     google_sse_lines = [
         'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello world"}]}}], "usageMetadata": {"promptTokenCount": 15, "candidatesTokenCount": 8, "totalTokenCount": 23}}}',
         'data: {"response": {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}}',
         "data: [DONE]",
     ]
 
-    async def fake_stream():
+    def fake_stream():
         for line in google_sse_lines:
             yield line
 
     output_chunks = []
-    async for chunk_str in transform_google_sse_to_openai(fake_stream(), "gemini-3.7-flash"):
+    for chunk_str in transform_google_sse_to_openai(fake_stream(), "gemini-3.7-flash"):
         output_chunks.append(chunk_str)
 
     finish_chunk = json.loads(output_chunks[-2].replace("data: ", "").strip())
@@ -267,8 +264,7 @@ async def test_transform_google_sse_with_usage_metadata():
     assert finish_chunk["usage"]["total_tokens"] == 23
 
 
-@pytest.mark.asyncio
-async def test_aggregate_google_sse_to_openai_response():
+def test_aggregate_google_sse_to_openai_response():
     google_sse_lines = [
         'data: {"response": {"candidates": [{"content": {"parts": [{"thought": true, "text": "Plan: say hello."}]}}]}}',
         'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello!"}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}}}',
@@ -276,11 +272,11 @@ async def test_aggregate_google_sse_to_openai_response():
         "data: [DONE]",
     ]
 
-    async def fake_stream():
+    def fake_stream():
         for line in google_sse_lines:
             yield line
 
-    response = await aggregate_google_sse_to_openai_response(fake_stream(), "gemini-3.7-flash")
+    response = aggregate_google_sse_to_openai_response(fake_stream(), "gemini-3.7-flash")
 
     assert response["object"] == "chat.completion"
     assert response["model"] == "gemini-3.7-flash"
@@ -445,3 +441,28 @@ def test_inline_and_sanitize_schema_properties_mapping_integrity():
     assert set(sanitized["properties"].keys()) == {"preset"}
     assert sanitized["properties"]["preset"]["type"] == "string"
     assert sanitized["properties"]["preset"]["description"] == "Layout preset"
+
+def test_thought_signature_association():
+    from hermes_antigravity.stream.transformer import record_thought_signature, retrieve_thought_signature
+    
+    # Test strict tool_id match
+    record_thought_signature("sig-123", tool_id="call-abc", fn_name="test_fn", args={"x": 1})
+    
+    # Matching id returns signature
+    assert retrieve_thought_signature(tool_id="call-abc") == "sig-123"
+    
+    # Different id returns None if args/fn_name don't match
+    assert retrieve_thought_signature(tool_id="call-xyz") is None
+    
+    # But same fn_name and args returns signature
+    assert retrieve_thought_signature(tool_id="call-xyz", fn_name="test_fn", args={"x": 1}) == "sig-123"
+    
+    # Test concurrent isolation (another call does not inherit signature)
+    assert retrieve_thought_signature(tool_id="call-other", fn_name="other_fn", args={"y": 2}) is None
+    
+    # Record another signature
+    record_thought_signature("sig-456", tool_id="call-other", fn_name="other_fn", args={"y": 2})
+    
+    # It must return exactly the matching one
+    assert retrieve_thought_signature(tool_id="call-other", fn_name="other_fn", args={"y": 2}) == "sig-456"
+    assert retrieve_thought_signature(tool_id="call-abc", fn_name="test_fn", args={"x": 1}) == "sig-123"

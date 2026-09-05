@@ -18,10 +18,9 @@ from hermes_antigravity.models.models import (
     PROVIDER_ID,
     PROVIDER_NAME,
 )
-from hermes_antigravity.proxy.server import (
-    DEFAULT_PROXY_PORT,
-    ensure_proxy_running,
-)
+from hermes_antigravity.client.client import ENDPOINT_FALLBACKS
+from hermes_antigravity.client.native import AntigravityClient, _sync_resolve_project_id
+from hermes_antigravity.client.catalog import fetch_available_models_sync
 from hermes_antigravity.usage.usage import format_quota_report
 
 logger = logging.getLogger(__name__)
@@ -68,11 +67,34 @@ class AntigravityProviderProfile(ProviderProfile):
         supports_reasoning: bool = False,
         **ctx: Any,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        ensure_proxy_running()
         extra_body: Dict[str, Any] = {}
         if reasoning_config:
             extra_body["reasoning_effort"] = reasoning_config.get("effort", "medium")
         return extra_body, {}
+
+    def create_client(self, **client_kwargs: Any) -> Any:
+        return AntigravityClient(**client_kwargs)
+
+    def fetch_models(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = 8.0,
+    ) -> list[str] | None:
+        creds = load_credentials()
+        if not creds:
+            return list(FALLBACK_MODELS)
+        
+        token = creds.access_token
+        try:
+            # We don't want to run the full discovery loop on every typing completion,
+            # but Hermes caches the result of fetch_models.
+            project_id = creds.project_id or _sync_resolve_project_id(token, seed=creds.email or "antigravity-default")
+            return fetch_available_models_sync(token, project_id)
+        except Exception as e:
+            logger.debug("Failed to fetch models: %s", e)
+            return list(FALLBACK_MODELS)
 
 
 # Default profile definition for Hermes
@@ -83,7 +105,7 @@ antigravity_profile = AntigravityProviderProfile(
     signup_url="https://cloud.google.com/products/gemini/code-assist",
     auth_type="oauth_external",
     api_mode="chat_completions",
-    base_url="http://127.0.0.1:51122/v1",
+    base_url=ENDPOINT_FALLBACKS[0],
     fallback_models=FALLBACK_MODELS,
     default_aux_model="gemini-3.8-flash",
     supports_vision=True,
@@ -100,6 +122,23 @@ def register(ctx: Any = None) -> None:
     logger.info("Antigravity plugin registered (OAuth provider)")
 
     register_provider(antigravity_profile)
+    
+    # Inject into standard Hermes OAuth provider lifecycle
+    try:
+        from hermes_cli.runtime_provider import _OAUTH_RUNTIME_PROVIDERS, _OAuthRuntimeSpec
+        from hermes_antigravity.auth.credentials import resolve_runtime_credentials
+        
+        _OAUTH_RUNTIME_PROVIDERS["antigravity"] = _OAuthRuntimeSpec(
+            resolve=resolve_runtime_credentials,
+            api_mode="chat_completions",
+            default_source="oauth",
+            expiry_key="expires_at",
+            failure_msg="Antigravity credentials failed",
+            default_base_url=ENDPOINT_FALLBACKS[0]
+        )
+        logger.debug("Successfully injected Antigravity into Hermes OAuth runtime providers.")
+    except ImportError:
+        logger.debug("Hermes _OAUTH_RUNTIME_PROVIDERS not found, skipping dynamic OAuth injection.")
 
     if ctx is not None and hasattr(ctx, "register_command"):
         ctx.register_command(
@@ -244,12 +283,6 @@ async def command_antigravity_doctor(*args: Any, **kwargs: Any) -> str:
         f"Refresh Token: {'Present' if creds.refresh_token else 'Missing'}",
         f"Project ID: {creds.project_id or 'Auto-resolved'}",
     ]
-
-    try:
-        proxy_url = ensure_proxy_running()
-        status_lines.append(f"In-process Proxy: Active ({proxy_url})")
-    except Exception as e:
-        status_lines.append(f"In-process Proxy: Error ({e})")
 
     return "\n".join(status_lines)
 
